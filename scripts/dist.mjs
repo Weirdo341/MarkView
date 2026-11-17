@@ -11,7 +11,7 @@ run(['scripts/prep-runtime.mjs']);
 
 // 工作区索引服务会锁定已生成的 asar，复用旧输出目录会 EBUSY；每次用全新目录
 const out = `package-${Date.now()}`;
-execFileSync('npx.cmd', ['electron-builder', '--win', `-c.directories.output=${out}`], { cwd: root, stdio: 'inherit' });
+run(['node_modules/electron-builder/out/cli/cli.js', '--win', `-c.directories.output=${out}`]);
 
 const dest = path.join(root, 'package');
 fs.mkdirSync(dest, { recursive: true });

@@ -14,6 +14,9 @@
   "build": {
     "appId": "com.markview.reader",
     "productName": "MarkView",
+    "compression": "maximum",
+    "electronLanguages": ["zh-CN", "en-US"],
+    "afterPack": "scripts/after-pack.mjs",
     "directories": {
       "output": "package"
     },

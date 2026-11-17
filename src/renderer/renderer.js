@@ -536,6 +536,47 @@ function applyTypewriter(on, persist) {
   if (persist) api.setConfig({ typewriterMode: state.typewriterMode });
 }
 
+/* ---------- 检查更新 ---------- */
+
+let updateModal = null;
+function closeUpdateModal() {
+  if (updateModal) { updateModal.remove(); updateModal = null; }
+}
+
+async function checkUpdate() {
+  toast('正在检查更新…');
+  const res = await api.checkUpdate();
+  if (!res || res.error) { toast('检查更新失败：' + ((res && res.error) || '网络不可达')); return; }
+  if (!res.newer) { toast('已是最新版本 ' + res.current); return; }
+  closeUpdateModal();
+  const wrap = document.createElement('div');
+  wrap.className = 'link-modal';
+  const card = document.createElement('div');
+  card.className = 'link-card';
+  const title = document.createElement('h3');
+  title.textContent = '发现新版本';
+  const info = document.createElement('div');
+  info.className = 'update-info';
+  info.textContent = `当前 ${res.current} → 最新 ${res.latestDisplay}`;
+  const btns = document.createElement('div');
+  btns.className = 'link-btns';
+  const cancel = document.createElement('button');
+  cancel.textContent = '稍后';
+  const dl = document.createElement('button');
+  dl.textContent = '下载更新';
+  dl.className = 'primary';
+  dl.addEventListener('click', () => { api.openExternal(res.url); closeUpdateModal(); });
+  cancel.addEventListener('click', closeUpdateModal);
+  btns.append(cancel, dl);
+  card.append(title, info, btns);
+  wrap.append(card);
+  wrap.addEventListener('mousedown', (e) => { if (e.target === wrap) closeUpdateModal(); });
+  card.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeUpdateModal(); });
+  document.body.append(wrap);
+  updateModal = wrap;
+  dl.focus();
+}
+
 /* ---------- 字体与排版 ---------- */
 
 const TYPO_DEFAULT = { size: 17, lineHeight: 1.8, paraSpace: 1 };
@@ -2844,6 +2885,7 @@ function bindKeys() {
       if (!lightbox.hidden) closeLightbox();
       else if (tableMenu) closeTableMenu();
       else if (!floatBar.hidden) hideFloatBar();
+      else if (updateModal) closeUpdateModal();
       else if (searchOpen) closeSearch();
     }
   });
@@ -2873,6 +2915,7 @@ function bindIpc() {
   api.on('menu:redo', redo);
   api.on('menu:insert', insertSnippet);
   api.on('menu:typography', openTypoPanel);
+  api.on('menu:check-update', checkUpdate);
   api.on('pdf:prepare', exportPdf);
   api.on('image:prepare', exportImage);
   api.on('find:result', ({ active, total }) => {

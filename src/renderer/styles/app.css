@@ -606,6 +606,7 @@ textarea.block-overlay {
 .typo-card label { display: flex; justify-content: space-between; align-items: center; }
 .typo-card label span { color: var(--fg); font-family: Consolas, monospace; }
 .typo-card input[type="range"] { width: 100%; accent-color: var(--accent); padding: 0; }
+.update-info { font-size: 13px; color: var(--fg); padding: 4px 0 8px; }
 .markdown-body hr { position: relative; }
 .blk-hover { position: relative; }
 .blk-delete {

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, shell, net } = require('electron');
 const fs = require('fs');
 const path = require('path');
 
@@ -55,6 +55,8 @@ const typoTest = rawArgs.includes('--typo-test');
 const typoShot = rawArgs.includes('--typo-shot');
 const edgeTest = rawArgs.includes('--edge-test');
 const dirtyExport = rawArgs.includes('--dirty-export');
+const updateTest = rawArgs.includes('--update-test');
+const updateMockNewer = rawArgs.includes('--update-mock-newer');
 const linkTest = rawArgs.includes('--link-test');
 const rapidTest = rawArgs.includes('--rapid-test');
 const linkShot = rawArgs.includes('--link-shot');
@@ -336,6 +338,7 @@ function buildMenu() {
     {
       label: '帮助',
       submenu: [
+        { label: '检查更新…', click: () => win?.webContents.send('menu:check-update') },
         {
           label: '关于 MarkView',
           click: () =>
@@ -444,6 +447,41 @@ ipcMain.handle('file:open', (e, p) => {
   if (typeof p === 'string') openPath(p);
 });
 ipcMain.handle('config:get', () => config);
+function parseVer(v) {
+  const m = String(v).replace(/^v/, '').match(/^(\d+)\.(\d+)\.(\d+)(?:-(\d{8}))?$/);
+  return m ? [+m[1], +m[2], +m[3], +(m[4] || 0)] : null;
+}
+function isNewer(a, b) {
+  const pa = parseVer(a);
+  const pb = parseVer(b);
+  if (!pa || !pb) return false;
+  for (let i = 0; i < 4; i++) {
+    if (pa[i] !== pb[i]) return pa[i] > pb[i];
+  }
+  return false;
+}
+function displayVer(tag) {
+  const m = String(tag).match(/^(\d+\.\d+\.\d+)-(\d{8})$/);
+  return m ? `v${m[1]} (Date ${m[2]})` : String(tag);
+}
+ipcMain.handle('update:check', async () => {
+  if (updateMockNewer) {
+    return { current: APP_VERSION_DISPLAY, latest: '9.9.9-20991231', latestDisplay: 'v9.9.9 (Date 20991231)', url: 'https://github.com/Weirdo341/MarkView/releases/latest', newer: true };
+  }
+  try {
+    const res = await net.fetch('https://api.github.com/repos/Weirdo341/MarkView/releases/latest', {
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'MarkView-update-check' },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return { error: 'HTTP ' + res.status };
+    const j = await res.json();
+    const tag = String(j.tag_name || '').replace(/^v/, '');
+    if (!parseVer(tag)) return { error: '无法解析远端版本：' + tag };
+    return { current: APP_VERSION_DISPLAY, latest: tag, latestDisplay: displayVer(tag), url: j.html_url, newer: isNewer(tag, APP_VERSION) };
+  } catch (e) {
+    return { error: (e && e.message) || '网络不可达' };
+  }
+});
 ipcMain.handle('fs:tree', async (e, dir) => {
   try {
     const entries = await fs.promises.readdir(dir, { withFileTypes: true });
@@ -1225,6 +1263,27 @@ ipcMain.on('render:done', async (e, info) => {
           const closed = await win.webContents.executeJavaScript(`document.getElementById('typo-modal').hidden`);
           const ok = open && vars.size === '22px' && vars.fs === '22px' && persisted && vars2 === '17px' && closed;
           console.log('typo test:', ok ? 'PASS' : 'FAIL', JSON.stringify({ open, vars, persisted, vars2, closed }));
+        }
+        if (updateTest && currentFile) {
+          win.webContents.send('menu:check-update');
+          await new Promise((r) => setTimeout(r, 2500));
+          const t = await win.webContents.executeJavaScript(`document.getElementById('toast').textContent`);
+          const modal = await win.webContents.executeJavaScript(`!!document.querySelector('.link-modal:not([hidden])')`);
+          console.log('update test:', !modal && t.includes('已是最新版本') ? 'PASS' : 'FAIL', JSON.stringify(t));
+        }
+        if (updateMockNewer && currentFile) {
+          win.webContents.send('menu:check-update');
+          await new Promise((r) => setTimeout(r, 1000));
+          const ok = await win.webContents.executeJavaScript(
+            `(() => { const c = document.querySelector('.link-modal:not([hidden]) .link-card'); if (!c) return false;
+               const txt = c.textContent;
+               const b = [...c.querySelectorAll('button')].find((x) => x.textContent === '稍后');
+               if (b) b.click();
+               return txt.includes('发现新版本') && txt.includes('9.9.9'); })()`
+          );
+          await new Promise((r) => setTimeout(r, 300));
+          const closed = await win.webContents.executeJavaScript(`!document.querySelector('.link-modal:not([hidden])')`);
+          console.log('update-mock test:', ok && closed ? 'PASS' : 'FAIL');
         }
         if (edgeTest && currentFile) {
           const mainFile = currentFile;

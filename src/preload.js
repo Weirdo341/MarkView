@@ -21,6 +21,7 @@ const LISTEN_CHANNELS = new Set([
   'menu:toggle-edit',
   'menu:insert',
   'menu:typography',
+  'menu:check-update',
   'find:result',
   'recent:cleared',
 ]);
@@ -29,6 +30,7 @@ contextBridge.exposeInMainWorld('api', {
   openDialog: () => ipcRenderer.invoke('dialog:open'),
   openPath: (p) => ipcRenderer.invoke('file:open', p),
   getConfig: () => ipcRenderer.invoke('config:get'),
+  checkUpdate: () => ipcRenderer.invoke('update:check'),
   readDir: (p) => ipcRenderer.invoke('fs:tree', p),
   setConfig: (patch) => ipcRenderer.invoke('config:set', patch),
   samplePath: () => ipcRenderer.invoke('app:samplePath'),

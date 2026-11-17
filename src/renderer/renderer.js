@@ -381,8 +381,8 @@ function enhanceCodeBlocks() {
     btn.className = 'copy-btn';
     btn.textContent = '复制';
     btn.addEventListener('click', async () => {
-      await copyText(raw);
-      btn.textContent = '已复制';
+      const ok = await copyText(raw);
+      btn.textContent = ok ? '已复制' : '复制失败';
       setTimeout(() => { btn.textContent = '复制'; }, 1500);
     });
     head.append(label, btn);
@@ -1581,7 +1581,7 @@ function bindTableTools() {
 }
 
 async function copyText(text) {
-  await api.copyText(text);
+  return await api.copyText(text);
 }
 
 async function copySelectionAs(kind) {
@@ -1594,8 +1594,8 @@ async function copySelectionAs(kind) {
   box.append(sel.getRangeAt(0).cloneContents());
   box.querySelectorAll('button, textarea.block-overlay').forEach((n) => n.remove());
   const text = kind === 'html' ? box.innerHTML : serChildren(box);
-  await copyText(text);
-  toast(kind === 'html' ? '已复制为 HTML' : '已复制为 Markdown');
+  const ok = await copyText(text);
+  toast(ok ? (kind === 'html' ? '已复制为 HTML' : '已复制为 Markdown') : '复制失败：系统剪贴板不可用');
 }
 
 function handleLink(a, e) {

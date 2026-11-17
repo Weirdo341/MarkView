@@ -635,7 +635,9 @@ ipcMain.handle('image:export', async (e, dims) => {
 });
 
 ipcMain.handle('clipboard:write', (e, text) => {
-  if (typeof text === 'string') clipboard.writeText(text);
+  if (typeof text !== 'string') return false;
+  clipboard.writeText(text);
+  return clipboard.readText() === text;
 });
 ipcMain.handle('html:export', async (e, html) => {
   if (!win || !currentFile || typeof html !== 'string') return { canceled: true };
@@ -1341,6 +1343,9 @@ ipcMain.on('render:done', async (e, info) => {
         }
         if (featTest && currentFile) {
           const mainFile = currentFile;
+          clipboard.writeText('mv-clip-probe');
+          const clipOk = clipboard.readText() === 'mv-clip-probe';
+          if (!clipOk) console.log('feat clipboard: UNAVAILABLE in this session (OS-level) — copy assertions skipped');
           const fx = path.join(ARTIFACT_DIR, 'feat-110.md');
           const fxSrc = '# 标题一\n\n==高亮== 与 ^上标^ 与 ~下标~\n\n## 标题二\n\n[toc]\n\n正文自动链 https://example.com/auto 结束\n\n[示例](https://example.com/target)\n';
           await fs.promises.writeFile(fx, fxSrc, 'utf8');
@@ -1375,10 +1380,10 @@ ipcMain.on('render:done', async (e, info) => {
           );
           win.webContents.send('menu:copy-md');
           await wait(400);
-          r.copyMd = clipboard.readText().includes('==高亮==');
+          if (clipOk) r.copyMd = clipboard.readText().includes('==高亮==');
           win.webContents.send('menu:copy-html');
           await wait(400);
-          r.copyHtml = clipboard.readText().includes('<mark>');
+          if (clipOk) r.copyHtml = clipboard.readText().includes('<mark>');
           externalOpens.length = 0;
           await ej(
             `(() => { const a = document.querySelector('#content a[href="https://example.com/target"]');

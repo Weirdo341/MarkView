@@ -1,0 +1,63 @@
+{
+  "name": "markview",
+  "productName": "MarkView",
+  "version": "1.0.0-20261116",
+  "description": "简洁的本地 Markdown 阅读与编辑工具",
+  "main": "src/main.js",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "node scripts/build.mjs && electron .",
+    "dev": "node scripts/build.mjs --watch",
+    "dist": "node scripts/dist.mjs"
+  },
+  "build": {
+    "appId": "com.markview.reader",
+    "productName": "MarkView",
+    "directories": {
+      "output": "package"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "dist/**/*",
+      "!node_modules/**"
+    ],
+    "asar": true,
+    "electronDist": ".runtime",
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "MarkView",
+      "artifactName": "MarkView-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "MarkView-Portable-${version}.${ext}"
+    }
+  },
+  "dependencies": {
+    "highlight.js": "^11.12.0",
+    "katex": "^0.19.1",
+    "markdown-it": "^15.0.3",
+    "markdown-it-anchor": "^10.1.0",
+    "markdown-it-footnote": "^4.0.0",
+    "markdown-it-task-lists": "^2.1.1",
+    "mermaid": "^12.3.0"
+  },
+  "devDependencies": {
+    "@napi-rs/canvas": "^1.1.1",
+    "electron": "^43.3.0",
+    "electron-builder": "^26.18.0",
+    "esbuild": "^0.28.2",
+    "pdfjs-dist": "^6.5.438"
+  }
+}

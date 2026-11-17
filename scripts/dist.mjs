@@ -27,9 +27,9 @@ for (const f of fs.readdirSync(dest)) {
     fs.rmSync(path.join(dest, f));
   }
 }
-// 尽力清理历史解包目录（被索引服务锁定的会留到重启后）
+// 尽力清理历史解包目录（被索引服务锁定的会留到重启后）；只删目录，避免误删 package-lock.json
 for (const d of fs.readdirSync(root)) {
-  if (d.startsWith('package-') && d !== out) {
+  if (d.startsWith('package-') && d !== out && fs.statSync(path.join(root, d)).isDirectory()) {
     try { fs.rmSync(path.join(root, d), { recursive: true, force: true }); } catch {}
   }
 }

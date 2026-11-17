@@ -76,14 +76,14 @@
 
     <footer id="statusbar">
       <div class="status-left">
-        <span id="stat-save"></span>
-        <span id="stat-words"></span>
-        <span id="stat-time"></span>
+        <span id="stat-save" title="停止输入约 0.25 秒后自动保存"></span>
+        <span id="stat-words" title="字数（中文按字、英文按词）"></span>
+        <span id="stat-time" title="预计阅读时长"></span>
         <span id="stat-file" class="status-path"></span>
       </div>
       <div class="status-right">
         <button id="btn-zoom-out" class="status-btn" title="缩小 (Ctrl+-)">−</button>
-        <span id="zoom-level" title="缩放比例 (Ctrl+0 重置)">100%</span>
+        <button id="zoom-level" class="status-btn zoom-level" title="缩放比例 · 点击重置 (Ctrl+0)">100%</button>
         <button id="btn-zoom-in" class="status-btn" title="放大 (Ctrl+=)">+</button>
       </div>
     </footer>
@@ -112,8 +112,8 @@
   </div>
 
   <div id="float-bar" hidden>
-    <button data-fmt="bold" title="加粗"><b>B</b></button>
-    <button data-fmt="italic" title="斜体"><i>I</i></button>
+    <button data-fmt="bold" title="加粗 (Ctrl+B)"><b>B</b></button>
+    <button data-fmt="italic" title="斜体 (Ctrl+I)"><i>I</i></button>
     <button data-fmt="strike" title="删除线"><s>S</s></button>
     <button data-fmt="code" title="行内代码"><span style="font-family:Consolas,monospace;font-size:11px">&lt;/&gt;</span></button>
     <span class="fb-sep"></span>
@@ -126,7 +126,7 @@
     <button data-fmt="swatch" data-color="#656d76" class="fb-swatch" style="background:#656d76" title="灰 #656d76"></button>
     <button data-fmt="color" title="更多颜色 / 自定义 / 取色笔"><span class="fb-color">A</span></button>
     <span class="fb-sep"></span>
-    <button data-fmt="link" title="插入链接">
+    <button data-fmt="link" title="插入链接 (Ctrl+K)">
       <svg viewBox="0 0 16 16" width="13" height="13"><path fill="currentColor" d="M7.775 3.275a.75.75 0 0 0 1.06 1.06l1.25-1.25a2 2 0 1 1 2.83 2.83l-2.5 2.5a2 2 0 0 1-2.83 0 .75.75 0 0 0-1.06 1.06 3.5 3.5 0 0 0 4.95 0l2.5-2.5a3.5 3.5 0 0 0-4.95-4.95l-1.25 1.25Zm-4.69 9.64a2 2 0 0 1 0-2.83l2.5-2.5a2 2 0 0 1 2.83 0 .75.75 0 0 0 1.06-1.06 3.5 3.5 0 0 0-4.95 0l-2.5 2.5a3.5 3.5 0 0 0 4.95 4.95l1.25-1.25a.75.75 0 0 0-1.06-1.06l-1.25 1.25a2 2 0 0 1-2.83 0Z"/></svg>
     </button>
     <button data-fmt="clear" title="清除格式">
@@ -159,7 +159,7 @@
     </div>
     <img id="lightbox-img" alt="" />
   </div>
-  <div id="drop-overlay" hidden><div>释放以打开 Markdown 文件</div></div>
+  <div id="drop-overlay" hidden><div>释放以打开 Markdown 文件 · 图片拖入正文插入引用</div></div>
   <div id="toast" hidden></div>
 
   <script src="../../dist/renderer.js"></script>

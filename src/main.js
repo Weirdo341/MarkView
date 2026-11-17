@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog, ipcMain, shell, net } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, shell, net, clipboard } = require('electron');
 const fs = require('fs');
 const path = require('path');
 
@@ -65,7 +65,10 @@ const pasteTest = rawArgs.includes('--paste-test');
 const tableTest = rawArgs.includes('--table-test');
 const breakTest = rawArgs.includes('--break-test');
 const wideShot = rawArgs.includes('--wide-shot');
-if (capturePath || pdfOut || imgOut) fs.mkdirSync(ARTIFACT_DIR, { recursive: true });
+const featTest = rawArgs.includes('--feat-test');
+const uxTest = rawArgs.includes('--ux-test');
+const htmlOut = artifact(flagValue('html-out'));
+if (capturePath || pdfOut || imgOut || htmlOut) fs.mkdirSync(ARTIFACT_DIR, { recursive: true });
 const watchTest = rawArgs.includes('--watch-test');
 const noRestore = rawArgs.includes('--no-restore');
 const fileArg = rawArgs.find(
@@ -81,6 +84,9 @@ let devPdfTarget = null;
 let devPdfResolve = null;
 let devImgTarget = null;
 let devImgResolve = null;
+let devHtmlTarget = null;
+let devHtmlResolve = null;
+const externalOpens = [];
 let devRunStarted = false;
 let editMode = false;
 let selfWrite = null;
@@ -219,6 +225,7 @@ function buildMenu() {
         { type: 'separator' },
         { label: '导出为 PDF…', accelerator: 'CmdOrCtrl+P', click: () => win?.webContents.send('pdf:prepare') },
         { label: '导出为长图…', accelerator: 'CmdOrCtrl+Shift+E', click: () => win?.webContents.send('image:prepare') },
+        { label: '导出为 HTML…', accelerator: 'CmdOrCtrl+Shift+H', click: () => win?.webContents.send('html:prepare') },
         { type: 'separator' },
         { label: '关闭窗口', role: 'close' },
         { label: '退出', role: 'quit' },
@@ -233,6 +240,8 @@ function buildMenu() {
         { label: '查找…', accelerator: 'CmdOrCtrl+F', click: () => win?.webContents.send('menu:find') },
         { type: 'separator' },
         { label: '复制', role: 'copy' },
+        { label: '复制为 Markdown', click: () => win?.webContents.send('menu:copy-md') },
+        { label: '复制为 HTML', click: () => win?.webContents.send('menu:copy-html') },
         { label: '全选', role: 'selectAll' },
       ],
     },
@@ -254,6 +263,9 @@ function buildMenu() {
         { label: '加粗', accelerator: 'CmdOrCtrl+B', click: () => win?.webContents.send('menu:insert', 'bold') },
         { label: '斜体', accelerator: 'CmdOrCtrl+I', click: () => win?.webContents.send('menu:insert', 'italic') },
         { label: '删除线', click: () => win?.webContents.send('menu:insert', 'strike') },
+        { label: '高亮', click: () => win?.webContents.send('menu:insert', 'mark') },
+        { label: '上标', click: () => win?.webContents.send('menu:insert', 'sup') },
+        { label: '下标', click: () => win?.webContents.send('menu:insert', 'sub') },
         { label: '行内代码', click: () => win?.webContents.send('menu:insert', 'code') },
         { label: '代码块', accelerator: 'CmdOrCtrl+Shift+C', click: () => win?.webContents.send('menu:insert', 'codeblock') },
         { label: '文字颜色…', click: () => win?.webContents.send('menu:insert', 'color:panel') },
@@ -536,7 +548,9 @@ ipcMain.on('edit:changed', (e, on) => {
   buildMenu();
 });
 ipcMain.handle('shell:openExternal', (e, url) => {
-  if (typeof url === 'string' && /^https?:/i.test(url)) shell.openExternal(url);
+  if (typeof url !== 'string' || !/^https?:/i.test(url)) return;
+  if (featTest) { externalOpens.push(url); return; }
+  shell.openExternal(url);
 });
 ipcMain.handle('shell:openPath', (e, p) => {
   if (typeof p === 'string' && fs.existsSync(p)) return shell.openPath(p);
@@ -618,6 +632,42 @@ ipcMain.handle('image:export', async (e, dims) => {
   } finally {
     if (attached) dbg.detach();
   }
+});
+
+ipcMain.handle('clipboard:write', (e, text) => {
+  if (typeof text === 'string') clipboard.writeText(text);
+});
+ipcMain.handle('html:export', async (e, html) => {
+  if (!win || !currentFile || typeof html !== 'string') return { canceled: true };
+  if (devHtmlTarget) {
+    const target = devHtmlTarget;
+    devHtmlTarget = null;
+    await fs.promises.writeFile(target, html, 'utf8');
+    if (devHtmlResolve) devHtmlResolve();
+    devHtmlResolve = null;
+    return { saved: true, path: target };
+  }
+  const defaultName = path.basename(currentFile, path.extname(currentFile)) + '.html';
+  const res = await dialog.showSaveDialog(win, {
+    title: '导出 HTML',
+    defaultPath: path.join(path.dirname(currentFile), defaultName),
+    filters: [{ name: 'HTML 文档', extensions: ['html'] }],
+  });
+  if (res.canceled || !res.filePath) return { canceled: true };
+  await fs.promises.writeFile(res.filePath, html, 'utf8');
+  return { saved: true, path: res.filePath };
+});
+
+ipcMain.handle('html:assets', async () => {
+  const out = {};
+  try {
+    const dir = path.join(ROOT, 'dist');
+    for (const name of await fs.promises.readdir(dir)) {
+      if (!name.endsWith('.woff2')) continue;
+      out[name] = 'data:font/woff2;base64,' + (await fs.promises.readFile(path.join(dir, name))).toString('base64');
+    }
+  } catch {}
+  return out;
 });
 
 ipcMain.on('render:done', async (e, info) => {
@@ -714,6 +764,10 @@ ipcMain.on('render:done', async (e, info) => {
                return [r(t), r(p), t.scrollHeight - t.clientHeight, p.scrollHeight - p.clientHeight, document.body.classList.contains('edit-mode')]; })()`
           );
           console.log('sync test:', Math.abs(ratios[0] - ratios[1]) < 0.02 ? 'PASS' : 'FAIL', ratios);
+          if (ratios[4]) {
+            win.webContents.send('menu:toggle-edit');
+            await new Promise((r) => setTimeout(r, 600));
+          }
         }
         if (editTest && currentFile) {
           const orig = await fs.promises.readFile(currentFile, 'utf8');
@@ -1284,6 +1338,188 @@ ipcMain.on('render:done', async (e, info) => {
           await new Promise((r) => setTimeout(r, 300));
           const closed = await win.webContents.executeJavaScript(`!document.querySelector('.link-modal:not([hidden])')`);
           console.log('update-mock test:', ok && closed ? 'PASS' : 'FAIL');
+        }
+        if (featTest && currentFile) {
+          const mainFile = currentFile;
+          const fx = path.join(ARTIFACT_DIR, 'feat-110.md');
+          const fxSrc = '# 标题一\n\n==高亮== 与 ^上标^ 与 ~下标~\n\n## 标题二\n\n[toc]\n\n正文自动链 https://example.com/auto 结束\n\n[示例](https://example.com/target)\n';
+          await fs.promises.writeFile(fx, fxSrc, 'utf8');
+          await openPath(fx);
+          await new Promise((r) => setTimeout(r, 1200));
+          const ej = (js) => win.webContents.executeJavaScript(js);
+          const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+          const r = {};
+          r.mark = await ej(`!!document.querySelector('#content mark')`);
+          r.sup = await ej(`!!document.querySelector('#content sup')`);
+          r.sub = await ej(`!!document.querySelector('#content sub')`);
+          r.toc = await ej(`document.querySelectorAll('#content .toc-inline a').length === 2`);
+          r.linkify = await ej(`!!document.querySelector('#content a[href="https://example.com/auto"]')`);
+          await ej(
+            `(() => { const p = [...document.querySelectorAll('#content p[data-blk]')].find((x) => x.textContent.includes('正文自动链'));
+               const tn = [...p.childNodes].find((n) => n.nodeType === 3 && n.textContent.includes('正文'));
+               document.getElementById('content').focus();
+               const rg = document.createRange(); rg.setStart(tn, 0); rg.collapse(true);
+               const s = document.getSelection(); s.removeAllRanges(); s.addRange(rg);
+               document.execCommand('insertText', false, 'X'); return true; })()`
+          );
+          await wait(900);
+          let now = await fs.promises.readFile(fx, 'utf8');
+          r.roundtrip = now.includes('==高亮==') && now.includes('^上标^') && now.includes('~下标~') && now.includes('[toc]') && now.includes('X正文自动链');
+          win.webContents.send('menu:undo');
+          await wait(900);
+          await ej(
+            `(() => { const m = document.querySelector('#content mark'); if (!m) return false;
+               document.getElementById('content').focus();
+               const rg = document.createRange(); rg.selectNodeContents(m.parentElement);
+               const s = document.getSelection(); s.removeAllRanges(); s.addRange(rg); return true; })()`
+          );
+          win.webContents.send('menu:copy-md');
+          await wait(400);
+          r.copyMd = clipboard.readText().includes('==高亮==');
+          win.webContents.send('menu:copy-html');
+          await wait(400);
+          r.copyHtml = clipboard.readText().includes('<mark>');
+          externalOpens.length = 0;
+          await ej(
+            `(() => { const a = document.querySelector('#content a[href="https://example.com/target"]');
+               a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true })); return true; })()`
+          );
+          await wait(400);
+          r.ctrlClick = externalOpens.includes('https://example.com/target');
+          r.noModal = await ej(`!document.querySelector('.link-modal:not([hidden])')`);
+          await ej(
+            `(() => { const p = [...document.querySelectorAll('#content p[data-blk]')].find((x) => x.textContent.includes('正文自动链'));
+               const tn = [...p.childNodes].find((n) => n.nodeType === 3 && n.textContent.includes('正文'));
+               document.getElementById('content').focus();
+               const rg = document.createRange(); rg.setStart(tn, 0); rg.setEnd(tn, 2);
+               const s = document.getSelection(); s.removeAllRanges(); s.addRange(rg);
+               const dt = new DataTransfer(); dt.setData('text/plain', 'https://example.com/pasted');
+               p.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })); return true; })()`
+          );
+          await wait(900);
+          now = await fs.promises.readFile(fx, 'utf8');
+          r.pasteUrl = now.includes('[正文](https://example.com/pasted)');
+          win.webContents.send('menu:undo');
+          await wait(900);
+          await ej(
+            `(() => { const m = document.querySelector('#content mark'); if (!m) return false;
+               document.getElementById('content').focus();
+               const rg = document.createRange(); rg.selectNodeContents(m);
+               const s = document.getSelection(); s.removeAllRanges(); s.addRange(rg); return true; })()`
+          );
+          win.webContents.send('menu:insert', 'mark');
+          await wait(900);
+          now = await fs.promises.readFile(fx, 'utf8');
+          r.markToggle = !now.includes('==高亮==') && now.includes('高亮 与');
+          win.webContents.send('menu:undo');
+          await wait(900);
+          if (htmlOut) {
+            await new Promise((resolve) => {
+              devHtmlResolve = resolve;
+              devHtmlTarget = path.resolve(htmlOut);
+              setTimeout(resolve, 15000);
+              win.webContents.send('html:prepare');
+            });
+            let html = '';
+            try { html = await fs.promises.readFile(path.resolve(htmlOut), 'utf8'); } catch {}
+            r.htmlExport = html.includes('<mark>') && html.includes('<style>') && html.includes('标题一');
+          }
+          console.log('feat test:', Object.values(r).every((v) => v === true) ? 'PASS' : 'FAIL', JSON.stringify(r));
+          await openPath(mainFile);
+          await wait(800);
+        }
+        if (uxTest && currentFile) {
+          await resetUi();
+          const ej = (js) => win.webContents.executeJavaScript(js);
+          const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+          const r = {};
+          win.webContents.send('menu:typography');
+          await wait(500);
+          r.typoFocus = await ej(`document.activeElement && document.activeElement.id === 'typo-size'`);
+          await ej(`document.getElementById('btn-search').focus()`);
+          await ej(`document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+          await wait(400);
+          r.typoEsc = await ej(`document.getElementById('typo-modal').hidden`);
+          await ej(
+            `(() => { const p = [...document.querySelectorAll('#content p[data-blk]')]
+                 .find((x) => [...x.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim().length >= 4));
+               const tn = [...p.childNodes].find((n) => n.nodeType === 3 && n.textContent.trim().length >= 4);
+               if (!tn) return false;
+               document.getElementById('content').focus();
+               const rg = document.createRange(); rg.setStart(tn, 0); rg.setEnd(tn, 4);
+               const s = document.getSelection(); s.removeAllRanges(); s.addRange(rg); return true; })()`
+          );
+          await wait(400);
+          await ej(`document.querySelector('#float-bar button[data-fmt="link"]').click()`);
+          await waitFor(() => ej(`!!document.querySelector('.link-modal:not([hidden]) .link-card')`), 3000);
+          for (let i = 0; i < 12; i++) {
+            win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
+            win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
+            await wait(60);
+          }
+          r.trap = await ej(`!!document.activeElement.closest('.link-card')`);
+          await ej(`document.getElementById('btn-search').click()`);
+          await wait(300);
+          r.z = await ej(
+            `(() => { const m = document.querySelector('.link-modal:not([hidden])'); const s = document.getElementById('search-bar');
+               return !!m && Number(getComputedStyle(m).zIndex) > Number(getComputedStyle(s).zIndex); })()`
+          );
+          await ej(`document.getElementById('btn-search-close').click()`);
+          await ej(`document.getElementById('btn-search').focus()`);
+          await ej(`document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+          await wait(400);
+          r.linkEsc = await ej(`!document.querySelector('.link-modal:not([hidden])')`);
+          win.webContents.send('menu:check-update');
+          await wait(120);
+          win.webContents.send('menu:check-update');
+          await wait(500);
+          r.toast = await ej(`(() => { const t = document.getElementById('toast'); return !t.hidden && t.textContent.length > 0; })()`);
+          await ej(`document.getElementById('btn-search').click()`);
+          await ej(`(() => { const i = document.getElementById('search-input'); i.value = ''; i.dispatchEvent(new Event('input')); return true; })()`);
+          await wait(400);
+          r.replDis = await ej(`document.getElementById('btn-replace').disabled && document.getElementById('btn-replace-all').disabled`);
+          await ej(`(() => { const i = document.getElementById('search-input'); i.value = '的'; i.dispatchEvent(new Event('input')); return true; })()`);
+          await wait(700);
+          r.replEn = await ej(`!document.getElementById('btn-replace').disabled && !document.getElementById('btn-replace-all').disabled`);
+          await ej(`document.getElementById('btn-search-close').click()`);
+          await ej(`document.getElementById('tab-files').click()`);
+          await waitFor(() => ej(`document.querySelectorAll('#file-tree [role="treeitem"]').length > 0`), 3000);
+          r.tree = await ej(`(() => { const n = document.querySelector('#file-tree [role="treeitem"]'); return !!n && n.tabIndex === 0; })()`);
+          await ej(`document.getElementById('tab-toc').click()`);
+          win.webContents.send('menu:toggle-sidebar');
+          await wait(500);
+          r.side = await ej(`(() => { const s = document.getElementById('sidebar'); return s.inert === true || getComputedStyle(s).visibility === 'hidden'; })()`);
+          win.webContents.send('menu:toggle-sidebar');
+          await wait(500);
+          win.webContents.send('menu:toggle-edit');
+          await wait(700);
+          await ej(`document.getElementById('editor').focus()`);
+          await ej(`document.getElementById('editor').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+          await wait(300);
+          r.srcEsc = await ej(`document.activeElement.id !== 'editor'`);
+          win.webContents.send('menu:toggle-edit');
+          await wait(700);
+          await ej(
+            `(() => { const ps = [...document.querySelectorAll('#content p[data-blk]')].filter((x) => x.textContent.trim().length >= 6);
+               const p = ps[ps.length - 1]; if (!p) return false;
+               const tn = [...p.childNodes].find((n) => n.nodeType === 3 && n.textContent.trim().length >= 6);
+               if (!tn) return false;
+               document.getElementById('content').focus();
+               const rg = document.createRange(); rg.setStart(tn, 0); rg.setEnd(tn, 6);
+               const s = document.getSelection(); s.removeAllRanges(); s.addRange(rg);
+               const sc = document.getElementById('scroll');
+               sc.scrollTop += rg.getBoundingClientRect().top - innerHeight + 140;
+               return true; })()`
+          );
+          await waitFor(() => ej(`!document.getElementById('float-bar').hidden`), 3000);
+          r.floatClamp = await ej(
+            `(() => { const b = document.getElementById('float-bar').getBoundingClientRect(); return b.bottom <= innerHeight - 4 && b.top >= 0; })()`
+          );
+          r.zoomBtn = await ej(`document.getElementById('zoom-level').tagName === 'BUTTON'`);
+          r.pressed = await ej(`document.getElementById('btn-edit').hasAttribute('aria-pressed')`);
+          r.recentCss = await ej(`getComputedStyle(document.querySelector('.recent-name') || document.body).textOverflow === 'ellipsis'`);
+          console.log('ux test:', Object.values(r).every((v) => v === true) ? 'PASS' : 'FAIL', JSON.stringify(r));
+          await resetUi();
         }
         if (edgeTest && currentFile) {
           const mainFile = currentFile;

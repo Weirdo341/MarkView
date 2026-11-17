@@ -46,6 +46,7 @@ const LANGS = {
 for (const [name, def] of Object.entries(LANGS)) hljs.registerLanguage(name, def);
 
 const MD_EXTS = ['.md', '.markdown', '.mdown', '.mkd', '.txt'];
+const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp'];
 const THEMES = ['light', 'dark', 'sepia'];
 const THEME_LABEL = { light: '浅色', dark: '深色', sepia: '护眼' };
 const MERMAID_THEME = { light: 'default', dark: 'dark', sepia: 'neutral' };
@@ -81,6 +82,74 @@ md.inline.ruler.before('text', 'color', (state, silent) => {
 });
 md.renderer.rules.color_open = (tokens, i) => `<span style="color:${tokens[i].attrGet('data-color')}" data-color="${tokens[i].attrGet('data-color')}">`;
 md.renderer.rules.color_close = () => '</span>';
+
+const EXT_PAIRS = [['==', 'mark'], ['^', 'sup'], ['~', 'sub']];
+function mathRegionAt(src, pos, env) {
+  const cache = (env.__mathCache || (env.__mathCache = new Map()));
+  let regions = cache.get(src);
+  if (!regions) {
+    regions = [];
+    let i = 0;
+    let open = -1;
+    let openLen = 0;
+    while (i < src.length) {
+      if (src[i] === '\\') { i += 2; continue; }
+      if (src[i] === '$') {
+        const len = src[i + 1] === '$' ? 2 : 1;
+        if (open < 0) { open = i; openLen = len; i += len; continue; }
+        if (len === openLen) { regions.push([open, i + len]); open = -1; i += len; continue; }
+        i += 1;
+        continue;
+      }
+      i++;
+    }
+    if (open >= 0) regions.push([open, src.length]);
+    if (cache.size > 200) cache.clear();
+    cache.set(src, regions);
+  }
+  return regions.some(([a, b]) => pos >= a && pos < b);
+}
+md.inline.ruler.after('strikethrough', 'mv_ext', (state, silent) => {
+  if (mathRegionAt(state.src, state.pos, state.env)) return false;
+  const rest = state.src.slice(state.pos);
+  for (const [d, tag] of EXT_PAIRS) {
+    if (!rest.startsWith(d)) continue;
+    if (d === '~' && (rest[1] === '~' || (state.pos > 0 && state.src[state.pos - 1] === '~'))) continue;
+    const close = rest.indexOf(d, d.length);
+    if (close <= d.length) continue;
+    const inner = rest.slice(d.length, close);
+    if (inner.includes('\n') || /^\s|\s$/.test(inner)) continue;
+    // 数学公式由 KaTeX 后置渲染，定界符内不得包裹 TeX 片段
+    if (/[$\\{}]/.test(inner)) continue;
+    if (!silent) {
+      state.push(tag + '_open', tag, 1);
+      const oldPos = state.pos;
+      const oldMax = state.posMax;
+      state.pos += d.length;
+      state.posMax = oldPos + close;
+      state.md.inline.tokenize(state);
+      state.pos = oldPos;
+      state.posMax = oldMax;
+      state.push(tag + '_close', tag, -1);
+    }
+    state.pos += close + d.length;
+    return true;
+  }
+  return false;
+});
+
+md.block.ruler.before('paragraph', 'toc_inline', (state, startLine, endLine, silent) => {
+  const pos = state.bMarks[startLine] + state.tShift[startLine];
+  const line = state.src.slice(pos, state.eMarks[startLine]);
+  if (!/^\[toc\]$/i.test(line.trim())) return false;
+  if (silent) return true;
+  const tok = state.push('toc_inline', 'nav', 0);
+  tok.map = [startLine, startLine + 1];
+  tok.meta = { src: line.trim() };
+  state.line = startLine + 1;
+  return true;
+}, { alt: ['paragraph', 'reference', 'blockquote', 'list'] });
+md.renderer.rules.toc_inline = (tokens, i) => `<nav class="toc-inline" data-toc-src="${tokens[i].meta.src}"></nav>`;
 
 md.block.ruler.before('paragraph', 'table_config', (state, startLine, endLine, silent) => {
   const pos = state.bMarks[startLine] + state.tShift[startLine];
@@ -187,7 +256,7 @@ const state = {
   path: null, dir: null, name: null,
   theme: 'light', font: 'sans', zoom: 0, sidebar: true,
   edit: false, raw: '', lastSave: null, wide: false, renderChain: Promise.resolve(), gaps: [], pendingMutation: false,
-  editing: null, pickerPending: false, blocks: [],
+  editing: null, blocks: [],
   headings: [], mermaidBlocks: [],
   focusMode: false, typewriterMode: false, focusBlk: null, twBlk: null,
   typography: { size: 17, lineHeight: 1.8, paraSpace: 1 },
@@ -229,6 +298,7 @@ async function doRender(text, { preserve = false } = {}) {
   tagBlocks();
   await renderMermaidBlocks();
   buildToc();
+  fillInlineToc();
   tagBlocks();
   updateStats();
 
@@ -422,6 +492,29 @@ function buildToc() {
   tocEl.append(ul);
 }
 
+function fillInlineToc() {
+  for (const nav of contentEl.querySelectorAll('nav.toc-inline')) {
+    nav.innerHTML = '';
+    if (!state.headings.length) {
+      nav.textContent = '（无标题）';
+      continue;
+    }
+    const minLevel = Math.min(...state.headings.map((h) => h.level));
+    const ul = document.createElement('ul');
+    for (const h of state.headings) {
+      const li = document.createElement('li');
+      li.className = 'toc-l' + Math.min(6, h.level - minLevel + 1);
+      const a = document.createElement('a');
+      a.href = '#' + h.id;
+      a.textContent = h.text;
+      a.addEventListener('click', (e) => { e.preventDefault(); scrollToHeading(h.id); });
+      li.append(a);
+      ul.append(li);
+    }
+    nav.append(ul);
+  }
+}
+
 function scrollToHeading(id) {
   const el = document.getElementById(id);
   if (!el) return;
@@ -481,6 +574,7 @@ function applyWide(on, persist) {
   state.wide = Boolean(on);
   document.body.classList.toggle('wide', state.wide);
   $('#btn-wide').classList.toggle('active', state.wide);
+  $('#btn-wide').setAttribute('aria-pressed', String(state.wide));
   if (persist) api.setConfig({ wide: state.wide });
 }
 
@@ -539,8 +633,28 @@ function applyTypewriter(on, persist) {
 /* ---------- 检查更新 ---------- */
 
 let updateModal = null;
+function syncInert() {
+  $('#app').inert = !!document.querySelector('.link-modal:not([hidden])');
+}
+function topModalCard() {
+  if (updateModal) return updateModal.querySelector('.link-card');
+  if (colorPanel) return colorPanel.querySelector('.link-card');
+  if (linkModal) return linkModal.querySelector('.link-card');
+  const typo = $('#typo-modal');
+  if (!typo.hidden) return typo.querySelector('.link-card');
+  return null;
+}
+function closeTopModal() {
+  if (updateModal) { closeUpdateModal(); return true; }
+  if (colorPanel) { closeColorPanel(); return true; }
+  if (linkModal) { (linkModal._cancel || closeLinkModal)(); return true; }
+  const typo = $('#typo-modal');
+  if (!typo.hidden) { typo.hidden = true; syncInert(); return true; }
+  return false;
+}
 function closeUpdateModal() {
   if (updateModal) { updateModal.remove(); updateModal = null; }
+  syncInert();
 }
 
 async function checkUpdate() {
@@ -574,6 +688,7 @@ async function checkUpdate() {
   card.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeUpdateModal(); });
   document.body.append(wrap);
   updateModal = wrap;
+  syncInert();
   dl.focus();
 }
 
@@ -603,6 +718,8 @@ function syncTypoSliders() {
 function openTypoPanel() {
   syncTypoSliders();
   $('#typo-modal').hidden = false;
+  syncInert();
+  $('#typo-size').focus();
 }
 
 function bindTypo() {
@@ -622,14 +739,15 @@ function bindTypo() {
     applyTypography({ ...TYPO_DEFAULT }, true);
     syncTypoSliders();
   });
-  $('#typo-close').addEventListener('click', () => { modal.hidden = true; });
-  modal.addEventListener('mousedown', (e) => { if (e.target === modal) modal.hidden = true; });
-  modal.addEventListener('keydown', (e) => { if (e.key === 'Escape') modal.hidden = true; });
+  $('#typo-close').addEventListener('click', () => { modal.hidden = true; syncInert(); });
+  modal.addEventListener('mousedown', (e) => { if (e.target === modal) { modal.hidden = true; syncInert(); } });
+  modal.addEventListener('keydown', (e) => { if (e.key === 'Escape') { modal.hidden = true; syncInert(); } });
 }
 
 function applySidebar(show, persist) {
   state.sidebar = show;
   document.body.classList.toggle('sidebar-hidden', !show);
+  $('#sidebar').inert = !show;
   if (persist) api.setConfig({ sidebar: show });
 }
 
@@ -666,19 +784,41 @@ async function renderTreeRoot() {
   head.textContent = api.basename(state.dir) || state.dir;
   head.title = state.dir;
   fileTreeEl.append(head);
-  const list = await buildTreeList(state.dir, 0);
-  if (seq !== treeSeq) return;
-  fileTreeEl.append(list);
+  const loading = document.createElement('div');
+  loading.className = 'tree-hint';
+  loading.textContent = '加载中…';
+  fileTreeEl.append(loading);
+  try {
+    const list = await buildTreeList(state.dir, 0);
+    if (seq !== treeSeq) return;
+    loading.remove();
+    fileTreeEl.append(list);
+  } catch {
+    loading.remove();
+    const err = document.createElement('div');
+    err.className = 'tree-hint';
+    err.textContent = '目录读取失败 ';
+    const retry = document.createElement('button');
+    retry.className = 'link-btn';
+    retry.textContent = '重试';
+    retry.addEventListener('click', renderTreeRoot);
+    err.append(retry);
+    fileTreeEl.append(err);
+  }
 }
 
 async function buildTreeList(dir, depth) {
   const box = document.createElement('div');
   box.className = 'tree-list';
+  box.setAttribute('role', 'group');
   const { dirs, files } = await api.readDir(dir);
   for (const name of dirs) {
     const row = document.createElement('div');
     row.className = 'tree-row tree-dir';
     row.style.paddingLeft = 8 + depth * 14 + 'px';
+    row.setAttribute('role', 'treeitem');
+    row.setAttribute('aria-expanded', 'false');
+    row.tabIndex = 0;
     const arrow = document.createElement('span');
     arrow.className = 'tree-arrow';
     arrow.textContent = '▶';
@@ -690,6 +830,7 @@ async function buildTreeList(dir, depth) {
     let open = false;
     row.addEventListener('click', async () => {
       open = !open;
+      row.setAttribute('aria-expanded', String(open));
       arrow.textContent = open ? '▼' : '▶';
       if (open && !childBox) {
         childBox = await buildTreeList(api.resolvePath(dir, name), depth + 1);
@@ -706,6 +847,8 @@ async function buildTreeList(dir, depth) {
     row.className = 'tree-row tree-file';
     row.style.paddingLeft = 8 + depth * 14 + 15 + 'px';
     row.title = full;
+    row.setAttribute('role', 'treeitem');
+    row.tabIndex = 0;
     const label = document.createElement('span');
     label.className = 'tree-name';
     label.textContent = name;
@@ -731,6 +874,18 @@ function refreshTreeActive() {
     row.classList.toggle('active', row.title === state.path);
   });
 }
+
+fileTreeEl.addEventListener('keydown', (e) => {
+  const row = e.target.closest('.tree-row');
+  if (!row) return;
+  const rows = [...fileTreeEl.querySelectorAll('.tree-row')].filter((r) => r.offsetParent !== null);
+  const i = rows.indexOf(row);
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); row.click(); }
+  else if (e.key === 'ArrowDown') { e.preventDefault(); (rows[i + 1] || rows[0]).focus(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); (rows[i - 1] || rows[rows.length - 1]).focus(); }
+  else if (e.key === 'ArrowRight' && row.classList.contains('tree-dir') && row.getAttribute('aria-expanded') === 'false') { e.preventDefault(); row.click(); }
+  else if (e.key === 'ArrowLeft' && row.classList.contains('tree-dir') && row.getAttribute('aria-expanded') === 'true') { e.preventDefault(); row.click(); }
+});
 
 function updateZoomLabel() {
   $('#zoom-level').textContent = Math.round(100 * Math.pow(1.2, state.zoom)) + '%';
@@ -786,6 +941,7 @@ function setActiveMatch(idx) {
     findIdx = -1;
     searchCount.textContent = searchInput.value ? '无结果' : '';
     searchCount.classList.toggle('no-match', Boolean(searchInput.value));
+    syncReplaceButtons();
     return;
   }
   findIdx = ((idx % findMatches.length) + findMatches.length) % findMatches.length;
@@ -798,11 +954,18 @@ function setActiveMatch(idx) {
   if (rect.top < sc.top + 40 || rect.bottom > sc.bottom - 40) {
     scrollEl.scrollTo({ top: scrollEl.scrollTop + rect.top - sc.top - sc.height / 2, behavior: 'smooth' });
   }
+  syncReplaceButtons();
 }
 
 function refreshFind() {
   collectMatches();
   setActiveMatch(0);
+}
+
+function syncReplaceButtons() {
+  const dis = !searchInput.value || searchCount.textContent === '' || searchCount.textContent === '无结果';
+  $('#btn-replace').disabled = dis;
+  $('#btn-replace-all').disabled = dis;
 }
 
 function runFind(opts) {
@@ -823,6 +986,7 @@ function openSearch() {
   searchInput.select();
   srcFindPos = 0;
   if (searchInput.value) runFind({});
+  syncReplaceButtons();
 }
 
 function closeSearch() {
@@ -961,6 +1125,7 @@ function bindSearch() {
   $('#btn-search-case').addEventListener('click', () => {
     caseSensitive = !caseSensitive;
     $('#btn-search-case').classList.toggle('active', caseSensitive);
+    $('#btn-search-case').setAttribute('aria-pressed', String(caseSensitive));
     srcFindPos = 0;
     if (searchInput.value) runFind({});
   });
@@ -977,6 +1142,7 @@ function bindSearch() {
         hlActive.clear();
         searchCount.textContent = '';
       }
+      syncReplaceButtons();
     }, 200);
   });
   searchInput.addEventListener('keydown', (e) => {
@@ -1094,7 +1260,13 @@ async function onPaste(e) {
   }
   if (state.edit || state.editing || contentEl.contains(e.target)) {
     e.preventDefault();
-    document.execCommand('insertText', false, cd.getData('text/plain'));
+    const plain = cd.getData('text/plain');
+    const sel = document.getSelection();
+    if (!state.edit && /^https?:\/\/\S+$/i.test(plain.trim()) && sel.rangeCount && !sel.isCollapsed && contentEl.contains(sel.anchorNode)) {
+      document.execCommand('createLink', false, plain.trim());
+      return;
+    }
+    document.execCommand('insertText', false, plain);
   }
 }
 
@@ -1293,9 +1465,14 @@ function openTableDialog(wrap) {
   card.append(btns);
   modal.append(card);
   modal.addEventListener('mousedown', (ev) => { if (ev.target === modal) closeLinkModal(); });
-  card.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') closeLinkModal(); });
+  card.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') closeLinkModal();
+    if (ev.key === 'Enter' && ev.target.tagName === 'INPUT') apply.click();
+  });
   document.body.append(modal);
   linkModal = modal;
+  syncInert();
+  (colInputs[0] ? colInputs[0].w : cancel).focus();
 }
 function bindTableTools() {
   contentEl.addEventListener('contextmenu', (e) => {
@@ -1336,13 +1513,17 @@ function bindTableTools() {
       menu.append(b);
     }
     document.body.append(menu);
-    menu.style.left = Math.min(e.clientX, window.innerWidth - 190) + 'px';
-    menu.style.top = Math.min(e.clientY, window.innerHeight - 250) + 'px';
+    const mw = menu.offsetWidth;
+    const mh = menu.offsetHeight;
+    menu.style.left = Math.max(8, Math.min(e.clientX, window.innerWidth - mw - 8)) + 'px';
+    menu.style.top = Math.max(8, Math.min(e.clientY, window.innerHeight - mh - 8)) + 'px';
     tableMenu = menu;
   });
   document.addEventListener('mousedown', (e) => {
     if (tableMenu && !e.target.closest('.table-menu')) closeTableMenu();
   });
+  scrollEl.addEventListener('scroll', closeTableMenu, { passive: true });
+  window.addEventListener('resize', closeTableMenu);
 
   let resize = null;
   contentEl.addEventListener('mousedown', (e) => {
@@ -1400,16 +1581,21 @@ function bindTableTools() {
 }
 
 async function copyText(text) {
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    document.body.append(ta);
-    ta.select();
-    document.execCommand('copy');
-    ta.remove();
+  await api.copyText(text);
+}
+
+async function copySelectionAs(kind) {
+  const sel = document.getSelection();
+  if (!sel.rangeCount || sel.isCollapsed || !contentEl.contains(sel.anchorNode)) {
+    toast('请先选中要复制的文字');
+    return;
   }
+  const box = document.createElement('div');
+  box.append(sel.getRangeAt(0).cloneContents());
+  box.querySelectorAll('button, textarea.block-overlay').forEach((n) => n.remove());
+  const text = kind === 'html' ? box.innerHTML : serChildren(box);
+  await copyText(text);
+  toast(kind === 'html' ? '已复制为 HTML' : '已复制为 Markdown');
 }
 
 function handleLink(a, e) {
@@ -1515,6 +1701,8 @@ function serInlineEl(n) {
   if (t === 'STRONG' || t === 'B') return '**' + serChildren(n) + '**';
   if (t === 'EM' || t === 'I') return '*' + serChildren(n) + '*';
   if (t === 'DEL' || t === 'S') return '~~' + serChildren(n) + '~~';
+  if (t === 'MARK') return '==' + serChildren(n) + '==';
+  if (t === 'SUB') return '~' + serChildren(n) + '~';
   if (t === 'CODE') return '`' + n.textContent + '`';
   if (t === 'A') {
     const href = n.getAttribute('href');
@@ -1522,6 +1710,7 @@ function serInlineEl(n) {
     return '[' + serChildren(n) + '](' + href + ')';
   }
   if (t === 'SUP' && n.classList.contains('footnote-ref')) return '[^' + (n.dataset.label || '1') + ']';
+  if (t === 'SUP') return '^' + serChildren(n) + '^';
   if (n.classList.contains('katex-display')) return '$$\n' + (n.dataset.tex || '') + '\n$$';
   if (n.classList.contains('katex')) return '$' + (n.dataset.tex || '') + '$';
   if (t === 'IMG') return '![' + (n.getAttribute('alt') || '') + '](' + (n.dataset.origSrc || n.getAttribute('src')) + ')';
@@ -1534,7 +1723,7 @@ function inlineSer(node) {
   const t = node.tagName;
   const isInline = t === 'BR' || t === 'DIV' || t === 'BUTTON' || t === 'TEXTAREA' || t === 'INPUT' ||
     t === 'STRONG' || t === 'B' || t === 'EM' || t === 'I' || t === 'DEL' || t === 'S' || t === 'CODE' ||
-    t === 'A' || t === 'IMG' ||
+    t === 'MARK' || t === 'SUP' || t === 'SUB' || t === 'A' || t === 'IMG' ||
     (t === 'SPAN' && (node.dataset.color || node.classList.contains('katex') || node.classList.contains('katex-display'))) ||
     (t === 'SUP' && node.classList.contains('footnote-ref'));
   return isInline ? serInlineEl(node) : serChildren(node);
@@ -1602,6 +1791,7 @@ function tableSer(wrap, srcSlice) {
 function blockSer(el, blk) {
   const srcLines = state.raw.split('\n').slice(blk.start, blk.end);
   const tag = el.tagName;
+  if (el.classList.contains('toc-inline')) return [el.dataset.tocSrc || '[toc]'];
   if (/^H[1-6]$/.test(tag)) return ['#'.repeat(Number(tag[1])) + ' ' + inlineSer(el).trim()];
   if (tag === 'BLOCKQUOTE') return quoteSer(el, 1);
   if (tag === 'UL' || tag === 'OL') return listSer(el, 0);
@@ -1761,6 +1951,8 @@ function onContentInput() {
     }
   }
   clearTimeout(liveTimer);
+  state.dirty = true;
+  updateSaveStatus();
   liveTimer = setTimeout(async () => {
     await state.renderChain;
     const next = serializeDoc(contentEl);
@@ -1948,10 +2140,11 @@ function openImageDialog(img, el, index) {
   wrap.addEventListener('mousedown', (ev) => { if (ev.target === wrap) closeLinkModal(); });
   card.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape') closeLinkModal();
-    if (ev.key === 'Enter') apply.click();
+    if (ev.key === 'Enter' && ev.target.tagName === 'INPUT') apply.click();
   });
   document.body.append(wrap);
   linkModal = wrap;
+  syncInert();
   ti.focus();
 }
 
@@ -1981,7 +2174,12 @@ function onContentClick(e) {
   }
   if (e.target.closest('.copy-btn')) return;
   const a0 = e.target.closest('a');
-  if (a0) { e.preventDefault(); openLinkDialog(a0); return; }
+  if (a0) {
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey) handleLink(a0, e);
+    else openLinkDialog(a0);
+    return;
+  }
   const cb = e.target.closest('input.task-list-item-checkbox');
   if (cb) {
     e.preventDefault();
@@ -2014,6 +2212,7 @@ let hoverBlk = null;
 let linkModal = null;
 function closeLinkModal() {
   if (linkModal) { linkModal.remove(); linkModal = null; }
+  syncInert();
 }
 function commitBlockOf(el) {
   commitLive();
@@ -2086,10 +2285,11 @@ function openLinkDialog(a, isNew = false) {
   wrap.addEventListener('mousedown', (ev) => { if (ev.target === wrap) cancelLink(); });
   card.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape') cancelLink();
-    if (ev.key === 'Enter') apply.click();
+    if (ev.key === 'Enter' && ev.target.tagName === 'INPUT') apply.click();
   });
   document.body.append(wrap);
   linkModal = wrap;
+  syncInert();
   ti.focus();
   ti.select();
 
@@ -2097,6 +2297,7 @@ function openLinkDialog(a, isNew = false) {
     if (isNew && !a.getAttribute('href') && a.parentNode) a.replaceWith(...a.childNodes);
     closeLinkModal();
   }
+  wrap._cancel = cancelLink;
 }
 function clearHover() {
   if (!hoverBlk) return;
@@ -2175,7 +2376,7 @@ function bindContent() {
     }
   });
   contentEl.addEventListener('focusout', (e) => {
-    if (state.edit || state.pickerPending) return;
+    if (state.edit) return;
     const rt = e.relatedTarget;
     if (rt && (contentEl.contains(rt) || rt.closest('.link-modal') || rt.closest('.table-menu') || rt.closest('#lightbox') || rt.closest('.color-panel') || rt.closest('#float-bar'))) return;
     if (state.editing) { commitEditing(); return; }
@@ -2220,8 +2421,22 @@ function bindDragDrop() {
     if (!file) return;
     const p = api.getPathForFile(file);
     if (!p) { toast('无法获取文件路径'); return; }
-    if (!MD_EXTS.includes(api.extname(p).toLowerCase())) {
-      toast('仅支持 Markdown / 文本文件');
+    const ext = api.extname(p).toLowerCase();
+    if (IMAGE_EXTS.includes(ext)) {
+      if (!state.path || state.edit) { toast('请在阅读视图打开文档后拖入图片'); return; }
+      const rel = api.relPath(state.dir, p).split('\\').join('/');
+      const range = document.caretRangeFromPoint ? document.caretRangeFromPoint(e.clientX, e.clientY) : null;
+      const sel = document.getSelection();
+      if (range && contentEl.contains(range.startContainer)) {
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+      document.execCommand('insertText', false, `![${api.basename(p)}](${rel})`);
+      toast('已插入图片引用');
+      return;
+    }
+    if (!MD_EXTS.includes(ext)) {
+      toast('仅支持 Markdown / 文本文件，图片拖入正文可插入引用');
       return;
     }
     api.openPath(p);
@@ -2263,6 +2478,7 @@ function toggleEdit(on) {
   document.body.classList.toggle('edit-mode', on);
   editorWrap.hidden = !on;
   $('#btn-edit').classList.toggle('active', on);
+  $('#btn-edit').setAttribute('aria-pressed', String(on));
   if (on) {
     editor.value = state.raw;
     editor.focus();
@@ -2279,7 +2495,11 @@ function toggleEdit(on) {
 
 function updateSaveStatus() {
   const el = $('#stat-save');
-  el.textContent = state.lastSave ? '自动保存 · ' + state.lastSave.toTimeString().slice(0, 8) : '自动保存';
+  el.classList.toggle('save-failed', Boolean(state.saveFailed));
+  el.textContent = state.saveFailed ? '保存失败'
+    : state.dirty ? '未保存…'
+    : state.lastSave ? '自动保存 · ' + state.lastSave.toTimeString().slice(0, 8) : '自动保存';
+  el.title = state.saveFailed ? '写入文件失败，请检查文件权限或占用' : '停止输入约 0.25 秒后自动保存';
 }
 
 async function saveCurrent() {
@@ -2288,14 +2508,20 @@ async function saveCurrent() {
   const res = await api.saveFile(state.raw);
   if (res && res.saved) {
     state.lastSave = new Date();
+    state.dirty = false;
+    state.saveFailed = false;
     updateSaveStatus();
   } else {
+    state.saveFailed = true;
+    updateSaveStatus();
     toast('保存失败');
   }
 }
 
 function onEditorInput() {
   state.raw = editor.value;
+  state.dirty = true;
+  updateSaveStatus();
   clearTimeout(renderTimer);
   renderTimer = setTimeout(() => renderMarkdown(state.raw, { preserve: true }), 300);
   clearTimeout(saveTimer);
@@ -2317,6 +2543,8 @@ function bindEditor() {
       e.preventDefault();
       editor.setRangeText('  ', editor.selectionStart, editor.selectionEnd, 'end');
       onEditorInput();
+    } else if (e.key === 'Escape') {
+      editor.blur();
     }
   });
   editor.addEventListener('scroll', () => {
@@ -2333,6 +2561,9 @@ const INSERT_DEFS = {
   bold: { wrap: ['**', '**'], ph: '加粗文字' },
   italic: { wrap: ['*', '*'], ph: '斜体文字' },
   strike: { wrap: ['~~', '~~'], ph: '删除文字' },
+  mark: { wrap: ['==', '=='], ph: '高亮文字' },
+  sup: { wrap: ['^', '^'], ph: '上标' },
+  sub: { wrap: ['~', '~'], ph: '下标' },
   code: { wrap: ['`', '`'], ph: '代码' },
   link: { wrap: ['[', '](https://)'], ph: '链接文字', selectTail: 'https://' },
   codeblock: { block: '```language\n', ph: '代码', tail: '\n```\n' },
@@ -2384,6 +2615,7 @@ let colorPanel = null;
 
 function closeColorPanel() {
   if (colorPanel) { colorPanel.remove(); colorPanel = null; }
+  syncInert();
 }
 
 function normalizeHex(v) {
@@ -2499,6 +2731,7 @@ async function openColorPanel() {
   wrap.append(card);
   document.body.append(wrap);
   colorPanel = wrap;
+  syncInert();
   hexInput.focus();
 
   async function applyFromPanel(color) {
@@ -2550,6 +2783,37 @@ async function insertSnippet(key) {
     editor.setRangeText(`{${key.slice(6)}}(${inner})`, s, e, 'end');
     editor.focus();
     onEditorInput();
+    return;
+  }
+  if (key === 'mark' || key === 'sup' || key === 'sub') {
+    const tag = key.toUpperCase();
+    const d = key === 'mark' ? '==' : key === 'sup' ? '^' : '~';
+    if (state.edit) {
+      pushUndo();
+      const s = editor.selectionStart;
+      const e = editor.selectionEnd;
+      const inner = editor.value.slice(s, e) || INSERT_DEFS[key].ph;
+      editor.setRangeText(d + inner + d, s, e, 'end');
+      editor.focus();
+      onEditorInput();
+      return;
+    }
+    await state.renderChain;
+    const range = getActiveRange();
+    if (!range) { toast('请先选中文字'); return; }
+    let anc = range.commonAncestorContainer;
+    if (anc.nodeType === 3) anc = anc.parentElement;
+    const wrapped = anc.closest(tag.toLowerCase());
+    if (wrapped && wrapped.contains(range.startContainer) && wrapped.contains(range.endContainer)) {
+      wrapped.replaceWith(...wrapped.childNodes);
+    } else {
+      const el = document.createElement(tag);
+      try { range.surroundContents(el); }
+      catch { el.append(range.extractContents()); range.insertNode(el); }
+    }
+    document.getSelection().removeAllRanges();
+    lastSelSnap = null;
+    commitLive();
     return;
   }
   if (!state.edit) toggleEdit(true);
@@ -2635,6 +2899,7 @@ function updateFloatBar() {
   x = Math.max(8, Math.min(window.innerWidth - bw - 8, x));
   let y = rect.top - bh - 8;
   if (y < 8) y = rect.bottom + 8;
+  y = Math.max(8, Math.min(y, window.innerHeight - bh - 8));
   floatBar.style.left = x + 'px';
   floatBar.style.top = y + 'px';
   const tags = { bold: 'strong', italic: 'em', strike: 'del', code: 'code' };
@@ -2676,7 +2941,7 @@ function clearInlineFormat() {
   if (!range) { toast('请先选中文字'); return; }
   const blk = blockOfRange(range);
   if (!blk || blk.tagName === 'PRE') { toast('代码块请在源码模式编辑'); return; }
-  blk.querySelectorAll('strong, b, em, i, del, s, code, span[data-color], a').forEach((el) => {
+  blk.querySelectorAll('strong, b, em, i, del, s, code, mark, sup, sub, span[data-color], a').forEach((el) => {
     if (range.intersectsNode(el)) el.replaceWith(...el.childNodes);
   });
   document.getSelection().removeAllRanges();
@@ -2798,17 +3063,63 @@ async function exportImage() {
   }
 }
 
+/* ---------- HTML 导出 ---------- */
+
+async function exportHtml() {
+  if (exporting) return;
+  if (!state.path) { toast('请先打开一个 Markdown 文件'); return; }
+  exporting = true;
+  toast('正在生成 HTML…');
+  commitEditing();
+  await flushEditRender();
+  try {
+    const fonts = await api.htmlAssets();
+    let css = [...document.styleSheets]
+      .map((ss) => { try { return [...ss.cssRules].map((r) => r.cssText).join('\n'); } catch { return ''; } })
+      .join('\n');
+    css = css.replace(/url\((["']?)([^)"']+\.woff2)\1\)/g, (m, q, name) => {
+      const key = name.split('/').pop();
+      return fonts[key] ? `url(${fonts[key]})` : m;
+    });
+    const clone = contentEl.cloneNode(true);
+    clone.querySelectorAll('button, textarea.block-overlay').forEach((n) => n.remove());
+    clone.querySelectorAll('[data-blk]').forEach((n) => {
+      n.removeAttribute('data-blk');
+      n.removeAttribute('data-src');
+      n.removeAttribute('data-cfg');
+    });
+    clone.querySelectorAll('img[data-orig-src]').forEach((im) => im.setAttribute('src', im.dataset.origSrc));
+    clone.querySelectorAll('.blk-hover, .drop-target').forEach((n) => n.classList.remove('blk-hover', 'drop-target'));
+    clone.removeAttribute('contenteditable');
+    clone.className = 'markdown-body';
+    const vars = document.documentElement.getAttribute('style') || '';
+    const theme = document.documentElement.dataset.theme || 'light';
+    const title = (state.name || 'MarkView').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const html = `<!doctype html>\n<html lang="zh-CN" data-theme="${theme}">\n<head>\n<meta charset="utf-8">\n<title>${title}</title>\n<style>\n${css}\n</style>\n</head>\n<body style="${vars}">\n<article class="markdown-body" style="max-width:860px;margin:0 auto;padding:32px 24px">\n${clone.innerHTML}\n</article>\n</body>\n</html>\n`;
+    const res = await api.exportHtml(html);
+    if (res && res.saved) toast('已导出：' + api.basename(res.path));
+    else if (res && res.error) toast('HTML 导出失败：' + res.error);
+  } catch (err) {
+    console.error(err);
+    toast('HTML 导出失败');
+  } finally {
+    exporting = false;
+  }
+}
+
 /* ---------- 提示 ---------- */
 
+let toastHideTimer = null;
 function toast(msg) {
   const t = $('#toast');
+  clearTimeout(toastTimer);
+  clearTimeout(toastHideTimer);
   t.textContent = msg;
   t.hidden = false;
   requestAnimationFrame(() => t.classList.add('show'));
-  clearTimeout(toastTimer);
   toastTimer = setTimeout(() => {
     t.classList.remove('show');
-    setTimeout(() => { t.hidden = true; }, 250);
+    toastHideTimer = setTimeout(() => { t.hidden = true; }, 250);
   }, 2600);
 }
 
@@ -2827,6 +3138,8 @@ function onFileOpened(data) {
   document.body.classList.remove('no-file');
   undoStack.length = 0;
   redoStack.length = 0;
+  state.dirty = false;
+  state.saveFailed = false;
   if (state.edit) editor.value = data.content;
   updateSaveStatus();
   refreshTreeActive();
@@ -2883,11 +3196,27 @@ function bindKeys() {
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       if (!lightbox.hidden) closeLightbox();
+      else if (closeTopModal()) return;
       else if (tableMenu) closeTableMenu();
       else if (!floatBar.hidden) hideFloatBar();
-      else if (updateModal) closeUpdateModal();
       else if (searchOpen) closeSearch();
+    } else if (e.key === 'Tab') {
+      const card = topModalCard();
+      if (!card) return;
+      const f = [...card.querySelectorAll('button, input, select, textarea, [tabindex]:not([tabindex="-1"])')]
+        .filter((n) => !n.disabled && n.offsetParent !== null);
+      if (!f.length) return;
+      const i = f.indexOf(document.activeElement);
+      if (e.shiftKey && i <= 0) { e.preventDefault(); f[f.length - 1].focus(); }
+      else if (!e.shiftKey && (i === -1 || i === f.length - 1)) { e.preventDefault(); f[0].focus(); }
     }
+  });
+  $('#toast').addEventListener('click', () => {
+    clearTimeout(toastTimer);
+    clearTimeout(toastHideTimer);
+    const t = $('#toast');
+    t.classList.remove('show');
+    t.hidden = true;
   });
 }
 
@@ -2916,12 +3245,16 @@ function bindIpc() {
   api.on('menu:insert', insertSnippet);
   api.on('menu:typography', openTypoPanel);
   api.on('menu:check-update', checkUpdate);
+  api.on('menu:copy-md', () => copySelectionAs('md'));
+  api.on('menu:copy-html', () => copySelectionAs('html'));
   api.on('pdf:prepare', exportPdf);
   api.on('image:prepare', exportImage);
+  api.on('html:prepare', exportHtml);
   api.on('find:result', ({ active, total }) => {
     if (!state.edit) return;
     searchCount.textContent = total ? `${active}/${total}` : '无结果';
     searchCount.classList.toggle('no-match', !total);
+    syncReplaceButtons();
   });
   api.on('recent:cleared', () => renderRecent([]));
 }

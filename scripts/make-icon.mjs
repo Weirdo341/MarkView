@@ -2,7 +2,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
-import pngToIco from 'png-to-ico';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const svg = Buffer.from(
@@ -23,5 +22,27 @@ const buffers = sizes.map((size) => {
 
 fs.mkdirSync(path.join(root, 'assets'), { recursive: true });
 fs.writeFileSync(path.join(root, 'assets', 'icon.png'), buffers[buffers.length - 1]);
-fs.writeFileSync(path.join(root, 'assets', 'icon.ico'), await pngToIco(buffers));
+fs.writeFileSync(path.join(root, 'assets', 'icon.ico'), pngIco(buffers, sizes));
 console.log('icon.ico written:', sizes.join(','));
+
+// ICO container with PNG-compressed entries (Vista+); avoids an extra dependency.
+function pngIco(pngs, dims) {
+  const head = Buffer.alloc(6);
+  head.writeUInt16LE(0, 0);
+  head.writeUInt16LE(1, 2);
+  head.writeUInt16LE(pngs.length, 4);
+  const entries = Buffer.alloc(16 * pngs.length);
+  let offset = 6 + entries.length;
+  pngs.forEach((buf, i) => {
+    const d = dims[i] >= 256 ? 0 : dims[i];
+    const o = i * 16;
+    entries.writeUInt8(d, o);
+    entries.writeUInt8(d, o + 1);
+    entries.writeUInt16LE(1, o + 4);
+    entries.writeUInt16LE(32, o + 6);
+    entries.writeUInt32LE(buf.length, o + 8);
+    entries.writeUInt32LE(offset, o + 12);
+    offset += buf.length;
+  });
+  return Buffer.concat([head, entries, ...pngs]);
+}

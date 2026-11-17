@@ -1,7 +1,7 @@
 {
   "name": "markview",
   "productName": "MarkView",
-  "version": "1.0.0-20261116",
+  "version": "1.0.1-20261117",
   "description": "简洁的本地 Markdown 阅读与编辑工具",
   "main": "src/main.js",
   "private": true,

@@ -82,7 +82,7 @@ npm run dist       # 打包安装版与便携版（产物在 package/）
 node scripts/associate.mjs
 ```
 
-写入 HKCU 注册表：`.md` 等扩展名的打开方式候选、右键「用 MarkView 打开」动词、应用列表登记。
+写入 HKCU 注册表：`.md` 等扩展名的打开方式候选、右键「用 MarkView 打开」动词、应用列表登记。关联目标为稳定副本 `%LOCALAPPDATA%\MarkView\MarkView.exe`（由便携版复制，`npm run dist` 自动刷新），不会指向会被清理的 `package/` 产物或会被 npm 升级清掉的 `node_modules` 副本；脚本同时清理历史上误把安装包/便携包本身登记成「打开方式」的注册项。
 
 **设为默认**：Windows 设置 → 应用 → 默认应用 → 按文件类型选择默认应用 → 找到 `.md` → 选择 MarkView；或右键 `.md` → 打开方式 → 选择其他应用 → 勾选「始终使用此应用」。Windows 保护用户默认选择，脚本不会静默篡改。
 

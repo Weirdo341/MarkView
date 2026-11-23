@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const exe = path.join(root, 'node_modules', 'electron', 'dist', 'MarkView.exe');
+const stableDir = path.join(process.env.LOCALAPPDATA, 'MarkView');
 
 const del = (key, ...rest) => {
   try {
@@ -21,7 +21,7 @@ for (const ext of ['.md', '.markdown']) {
   del(`HKCU\\Software\\Classes\\${ext}\\OpenWithProgids`, '/v', 'MarkView.md');
 }
 try {
-  fs.rmSync(exe);
+  fs.rmSync(stableDir, { recursive: true, force: true });
 } catch {}
 
 let current = '';
@@ -35,7 +35,7 @@ try {
   current = (out.match(/ProgId\s+REG_SZ\s+(.+)/) || [])[1]?.trim() || '';
 } catch {}
 
-console.log('已移除 MarkView 的全部注册表项与启动器副本。');
-if (current === 'MarkView.md') {
+console.log('已移除 MarkView 的全部注册表项与稳定副本目录。');
+if (current === 'MarkView.md' || /MarkView/i.test(current)) {
   console.log('注意：.md 默认程序仍指向 MarkView，请在 Windows 设置 > 默认应用 中重新选择。');
 }

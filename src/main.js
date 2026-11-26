@@ -1,6 +1,9 @@
 const { app, BrowserWindow, Menu, dialog, ipcMain, shell, net, clipboard } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const os = require('os');
+const { spawn } = require('child_process');
 
 const APP_VERSION = require('../package.json').version;
 const VERSION_MATCH = APP_VERSION.match(/^(\d+\.\d+\.\d+)-(\d{8})$/);
@@ -8,6 +11,17 @@ const APP_VERSION_DISPLAY = VERSION_MATCH
   ? `v${VERSION_MATCH[1]} (Date ${VERSION_MATCH[2]})`
   : `v${APP_VERSION}`;
 const ROOT = path.join(__dirname, '..');
+const ZH = require('./locales/zh-CN.json');
+const EN = require('./locales/en-US.json');
+let currentLanguage = 'zh-CN';
+function t(key) {
+  return (currentLanguage === 'en-US' ? EN : ZH)[key] || ZH[key] || key;
+}
+function tText(text) {
+  if (currentLanguage !== 'en-US' || typeof text !== 'string') return text;
+  const hit = Object.keys(ZH).find((key) => ZH[key] === text);
+  return hit ? EN[hit] || text : text;
+}
 
 const MD_EXTS = new Set(['.md', '.markdown', '.mdown', '.mkd', '.txt']);
 const THEME_BG = { light: '#ffffff', dark: '#191a1d', sepia: '#f6f1e5' };
@@ -67,6 +81,13 @@ const breakTest = rawArgs.includes('--break-test');
 const wideShot = rawArgs.includes('--wide-shot');
 const featTest = rawArgs.includes('--feat-test');
 const uxTest = rawArgs.includes('--ux-test');
+const audit2Test = rawArgs.includes('--audit2-test');
+const audit3Test = rawArgs.includes('--audit3-test');
+const audit4Test = rawArgs.includes('--audit4-test');
+const audit5Test = rawArgs.includes('--audit5-test');
+const pandocMock = rawArgs.includes('--pandoc-mock');
+const uploadMock = rawArgs.includes('--upload-mock');
+const devTestMode = rawArgs.some((a) => a.startsWith('--') && /(test|shot|mock)/.test(a));
 const htmlOut = artifact(flagValue('html-out'));
 if (capturePath || pdfOut || imgOut || htmlOut) fs.mkdirSync(ARTIFACT_DIR, { recursive: true });
 const watchTest = rawArgs.includes('--watch-test');
@@ -86,13 +107,155 @@ let devImgTarget = null;
 let devImgResolve = null;
 let devHtmlTarget = null;
 let devHtmlResolve = null;
+let devPandocTarget = null;
 const externalOpens = [];
 let devRunStarted = false;
+let devOriginalLanguage = null;
 let editMode = false;
 let selfWrite = null;
 
-const config = { theme: 'light', font: 'sans', zoom: 0, sidebar: true, wide: false, recent: [], lastFile: null, window: null };
+const config = { theme: 'light', font: 'sans', zoom: 0, sidebar: true, wide: false, spellcheck: false, language: 'auto', direction: 'auto', customCssEnabled: true, snapshotEnabled: true, snapshotMax: 50, snapshotDays: 30, pandocPath: '', imageUploadCommand: '', recent: [], lastFile: null, window: null };
 const configPath = () => path.join(app.getPath('userData'), 'config.json');
+const customCssPath = () => path.join(app.getPath('userData'), 'custom.css');
+
+function resolvedLanguage() {
+  if (config.language === 'en-US' || config.language === 'zh-CN') return config.language;
+  return app.getLocale().toLowerCase().startsWith('zh') ? 'zh-CN' : 'en-US';
+}
+function setLanguage(lang) {
+  config.language = lang;
+  currentLanguage = resolvedLanguage();
+  saveConfig();
+  buildMenu();
+  win?.webContents.send('language:set', currentLanguage);
+}
+function ensureCustomCss() {
+  try {
+    if (!fs.existsSync(customCssPath())) fs.writeFileSync(customCssPath(), ZH.customCssTemplate, 'utf8');
+  } catch {}
+}
+function sanitizeCustomCss(css) {
+  return String(css || '')
+    .replace(/@import[^;]+;/gi, '')
+    .replace(/url\(\s*(['"]?)(?:https?:|\/\/)[^)]+\)\1/gi, 'none');
+}
+function sendCustomCss() {
+  let css = '';
+  try { css = fs.readFileSync(customCssPath(), 'utf8'); } catch {}
+  win?.webContents.send('customCss:set', { enabled: config.customCssEnabled !== false, css: sanitizeCustomCss(css) });
+}
+function sendDirection() {
+  win?.webContents.send('direction:set', config.direction || 'auto');
+}
+
+const historyRoot = () => path.join(app.getPath('userData'), 'history');
+const historyDir = (file) => path.join(historyRoot(), crypto.createHash('sha256').update(path.resolve(file)).digest('hex').slice(0, 20));
+async function writeAtomic(file, content) {
+  const tmp = file + '.tmp-' + process.pid;
+  await fs.promises.writeFile(tmp, content, 'utf8');
+  await fs.promises.rename(tmp, file);
+}
+async function captureSnapshot(file, content) {
+  if (!config.snapshotEnabled || !file || typeof content !== 'string') return;
+  const dir = historyDir(file);
+  await fs.promises.mkdir(dir, { recursive: true });
+  let names = [];
+  try { names = (await fs.promises.readdir(dir)).filter((n) => n.endsWith('.md')).sort().reverse(); } catch {}
+  if (names.length) {
+    try { if ((await fs.promises.readFile(path.join(dir, names[0]), 'utf8')) === content) return; } catch {}
+  }
+  const id = Date.now().toString(36) + '-' + crypto.randomBytes(3).toString('hex');
+  await writeAtomic(path.join(dir, id + '.md'), content);
+  names = (await fs.promises.readdir(dir)).filter((n) => n.endsWith('.md')).sort().reverse();
+  const cutoff = Date.now() - Math.max(1, Number(config.snapshotDays) || 30) * 86400000;
+  const max = Math.max(1, Number(config.snapshotMax) || 50);
+  for (let i = names.length - 1; i >= 0; i--) {
+    const name = names[i];
+    const stamp = parseInt(name.split('-')[0], 36) * 1000;
+    if (i >= max || stamp < cutoff) await fs.promises.rm(path.join(dir, name), { force: true });
+  }
+}
+async function listSnapshots(file) {
+  const dir = historyDir(file);
+  let names = [];
+  try { names = (await fs.promises.readdir(dir)).filter((n) => n.endsWith('.md')).sort().reverse(); } catch { return []; }
+  const items = [];
+  for (const name of names.slice(0, Math.max(1, Number(config.snapshotMax) || 50))) {
+    try {
+      const full = path.join(dir, name);
+      const st = await fs.promises.stat(full);
+      const text = await fs.promises.readFile(full, 'utf8');
+      items.push({ id: name.slice(0, -3), time: st.mtimeMs, size: st.size, preview: text.slice(0, 500) });
+    } catch {}
+  }
+  return items;
+}
+async function restoreSnapshot(file, id) {
+  if (typeof file !== 'string' || typeof id !== 'string' || !/^[a-z0-9-]+$/i.test(id)) return { saved: false };
+  const snap = path.join(historyDir(file), id + '.md');
+  let content;
+  try { content = await fs.promises.readFile(snap, 'utf8'); } catch { return { saved: false }; }
+  let current = null;
+  try { current = await fs.promises.readFile(file, 'utf8'); } catch {}
+  if (current !== null && current !== content) await captureSnapshot(file, current);
+  await writeAtomic(file, content);
+  selfWrite = content;
+  win?.webContents.send('file:changed', { content });
+  return { saved: true };
+}
+ipcMain.handle('history:list', (e, file) => listSnapshots(file));
+ipcMain.handle('history:restore', (e, file, id) => restoreSnapshot(file, id));
+
+async function pandocStatus() {
+  if (pandocMock) return { available: true, version: 'mock', path: 'mock-pandoc' };
+  const exe = config.pandocPath || 'pandoc';
+  return new Promise((resolve) => {
+    const child = spawn(exe, ['--version'], { shell: false, windowsHide: true });
+    let out = '';
+    const timer = setTimeout(() => { child.kill(); resolve({ available: false, version: '', path: exe }); }, 5000);
+    child.stdout.on('data', (d) => { out += d.toString(); });
+    child.on('error', () => { clearTimeout(timer); resolve({ available: false, version: '', path: exe }); });
+    child.on('close', (code) => { clearTimeout(timer); resolve({ available: code === 0, version: out.split('\n')[0] || '', path: exe }); });
+  });
+}
+ipcMain.handle('pandoc:status', () => pandocStatus());
+ipcMain.handle('pandoc:export', async (e, format) => {
+  if (!win || !currentFile) return { canceled: true };
+  const map = { docx: ['docx', 'Word 文档'], odt: ['odt', 'OpenDocument'], rtf: ['rtf', 'RTF'], epub: ['epub', 'Epub'], latex: ['tex', 'LaTeX'] };
+  const spec = map[format];
+  if (!spec) return { error: 'Unsupported format' };
+  let output = devPandocTarget;
+  if (output) devPandocTarget = null;
+  else {
+    const base = path.basename(currentFile, path.extname(currentFile));
+    const res = await dialog.showSaveDialog(win, { title: t('pandocExport'), defaultPath: path.join(path.dirname(currentFile), base + '.' + spec[0]), filters: [{ name: spec[1], extensions: [spec[0]] }] });
+    if (res.canceled || !res.filePath) return { canceled: true };
+    output = res.filePath;
+  }
+  if (pandocMock) {
+    await writeAtomic(output, 'mock pandoc export: ' + format);
+    return { saved: true, path: output };
+  }
+  const status = await pandocStatus();
+  if (!status.available) return { error: t('pandocUnavailable') };
+  const temp = path.join(os.tmpdir(), `markview-${process.pid}-${Date.now()}.md`);
+  try {
+    await fs.promises.writeFile(temp, await fs.promises.readFile(currentFile, 'utf8'), 'utf8');
+    await new Promise((resolve, reject) => {
+      const child = spawn(status.path, ['--from=gfm', '--to=' + format, temp, '-o', output], { shell: false, windowsHide: true });
+      let err = '';
+      const timer = setTimeout(() => { child.kill(); reject(new Error('timeout')); }, 60000);
+      child.stderr.on('data', (d) => { err += d.toString(); });
+      child.on('error', reject);
+      child.on('close', (code) => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error(err || ('exit ' + code))); });
+    });
+    return { saved: true, path: output };
+  } catch (err) {
+    return { error: err.message || String(err) };
+  } finally {
+    await fs.promises.rm(temp, { force: true });
+  }
+});
 
 function loadConfig() {
   try {
@@ -108,6 +271,22 @@ function saveConfig() {
       fs.writeFileSync(configPath(), JSON.stringify(config, null, 2));
     } catch {}
   }, 250);
+}
+function beginDevLanguageIsolation() {
+  if (!devTestMode || devOriginalLanguage !== null) return;
+  devOriginalLanguage = config.language;
+  config.language = 'zh-CN';
+  currentLanguage = 'zh-CN';
+  buildMenu();
+  win?.webContents.send('language:set', 'zh-CN');
+}
+function restoreDevLanguageIsolation() {
+  if (devOriginalLanguage === null) return;
+  config.language = devOriginalLanguage;
+  currentLanguage = resolvedLanguage();
+  buildMenu();
+  try { fs.writeFileSync(configPath(), JSON.stringify(config, null, 2)); } catch {}
+  devOriginalLanguage = null;
 }
 
 function applyZoom() {
@@ -154,17 +333,23 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
-      spellcheck: false,
+      spellcheck: true,
     },
   });
 
+  win.webContents.session.setSpellCheckerLanguages(config.spellcheck ? ['en-US'] : []);
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
-  if (rawArgs.some((a) => /-(test|shot)$/.test(a))) win.webContents.setBackgroundThrottling(false);
+  if (devTestMode) win.webContents.setBackgroundThrottling(false);
   win.once('ready-to-show', () => {
     win.show();
     applyZoom();
   });
-  win.webContents.on('did-finish-load', applyZoom);
+  win.webContents.on('did-finish-load', () => {
+    applyZoom();
+    win?.webContents.send('language:set', currentLanguage);
+    sendCustomCss();
+    sendDirection();
+  });
   win.webContents.on('console-message', (e, level, message, line, sourceId) => {
     console.log(`[renderer] ${message} (${sourceId}:${line})`);
   });
@@ -222,10 +407,28 @@ function buildMenu() {
         { label: '最近打开', submenu: recentItems },
         { type: 'separator' },
         { label: '保存', accelerator: 'CmdOrCtrl+S', click: () => win?.webContents.send('menu:save') },
+        { label: '版本历史…', id: 'history-open', click: () => win?.webContents.send('menu:history') },
+        { label: '自动快照', id: 'snapshot-toggle', type: 'checkbox', checked: config.snapshotEnabled !== false, click: (mi) => { config.snapshotEnabled = mi.checked; saveConfig(); } },
         { type: 'separator' },
         { label: '导出为 PDF…', accelerator: 'CmdOrCtrl+P', click: () => win?.webContents.send('pdf:prepare') },
         { label: '导出为长图…', accelerator: 'CmdOrCtrl+Shift+E', click: () => win?.webContents.send('image:prepare') },
         { label: '导出为 HTML…', accelerator: 'CmdOrCtrl+Shift+H', click: () => win?.webContents.send('html:prepare') },
+        { label: '导出 HTML（无样式）…', click: () => win?.webContents.send('html:prepare-bare') },
+        {
+          label: 'Pandoc 导出',
+          submenu: [
+            { label: 'Word (.docx)', id: 'pandoc-docx', click: () => win?.webContents.send('pandoc:export', 'docx') },
+            { label: 'OpenDocument (.odt)', id: 'pandoc-odt', click: () => win?.webContents.send('pandoc:export', 'odt') },
+            { label: 'RTF (.rtf)', id: 'pandoc-rtf', click: () => win?.webContents.send('pandoc:export', 'rtf') },
+            { label: 'Epub (.epub)', id: 'pandoc-epub', click: () => win?.webContents.send('pandoc:export', 'epub') },
+            { label: 'LaTeX (.tex)', id: 'pandoc-latex', click: () => win?.webContents.send('pandoc:export', 'latex') },
+          ],
+        },
+        {
+          label: 'Pandoc / 图床设置…',
+          id: 'integration-settings',
+          click: () => win?.webContents.send('menu:integration-settings'),
+        },
         { type: 'separator' },
         { label: '关闭窗口', role: 'close' },
         { label: '退出', role: 'quit' },
@@ -263,6 +466,7 @@ function buildMenu() {
         { label: '加粗', accelerator: 'CmdOrCtrl+B', click: () => win?.webContents.send('menu:insert', 'bold') },
         { label: '斜体', accelerator: 'CmdOrCtrl+I', click: () => win?.webContents.send('menu:insert', 'italic') },
         { label: '删除线', click: () => win?.webContents.send('menu:insert', 'strike') },
+        { label: '下划线', click: () => win?.webContents.send('menu:insert', 'underline') },
         { label: '高亮', click: () => win?.webContents.send('menu:insert', 'mark') },
         { label: '上标', click: () => win?.webContents.send('menu:insert', 'sup') },
         { label: '下标', click: () => win?.webContents.send('menu:insert', 'sub') },
@@ -296,6 +500,18 @@ function buildMenu() {
           checked: editMode,
           accelerator: 'CmdOrCtrl+E',
           click: () => win?.webContents.send('menu:toggle-edit'),
+        },
+        {
+          label: '英文拼写检查',
+          id: 'spellcheck-toggle',
+          type: 'checkbox',
+          checked: config.spellcheck === true,
+          click: (mi) => {
+            config.spellcheck = mi.checked;
+            saveConfig();
+            win?.webContents.session.setSpellCheckerLanguages(mi.checked ? ['en-US'] : []);
+            win?.webContents.send('spellcheck:set', mi.checked);
+          },
         },
         {
           label: '宽屏视图',
@@ -338,6 +554,29 @@ function buildMenu() {
         { label: '黑体', type: 'radio', checked: config.font !== 'serif', click: () => setFont('sans') },
         { label: '衬线', type: 'radio', checked: config.font === 'serif', click: () => setFont('serif') },
         { label: '字体与排版…', click: () => win?.webContents.send('menu:typography') },
+        {
+          label: '语言',
+          submenu: [
+            { label: '简体中文', id: 'language-zh', type: 'radio', checked: currentLanguage === 'zh-CN', click: () => setLanguage('zh-CN') },
+            { label: 'English', id: 'language-en', type: 'radio', checked: currentLanguage === 'en-US', click: () => setLanguage('en-US') },
+          ],
+        },
+        {
+          label: '正文方向',
+          submenu: [
+            { label: '自动', id: 'direction-auto', type: 'radio', checked: (config.direction || 'auto') === 'auto', click: () => { config.direction = 'auto'; saveConfig(); sendDirection(); } },
+            { label: '从左到右 (LTR)', id: 'direction-ltr', type: 'radio', checked: config.direction === 'ltr', click: () => { config.direction = 'ltr'; saveConfig(); sendDirection(); } },
+            { label: '从右到左 (RTL)', id: 'direction-rtl', type: 'radio', checked: config.direction === 'rtl', click: () => { config.direction = 'rtl'; saveConfig(); sendDirection(); } },
+          ],
+        },
+        {
+          label: '自定义 CSS…',
+          submenu: [
+            { label: '打开自定义 CSS', click: () => { ensureCustomCss(); shell.openPath(customCssPath()); } },
+            { label: '启用自定义 CSS', id: 'custom-css-toggle', type: 'checkbox', checked: config.customCssEnabled !== false, click: (mi) => { config.customCssEnabled = mi.checked; saveConfig(); sendCustomCss(); } },
+            { label: '重新加载自定义 CSS', click: sendCustomCss },
+          ],
+        },
         { type: 'separator' },
         { label: '放大', accelerator: 'CmdOrCtrl+=', click: () => setZoom(config.zoom + 0.5) },
         { label: '缩小', accelerator: 'CmdOrCtrl+-', click: () => setZoom(config.zoom - 0.5) },
@@ -365,6 +604,13 @@ function buildMenu() {
       ],
     },
   ];
+  const translate = (items) => {
+    for (const item of items) {
+      if (item.label) item.label = tText(item.label);
+      if (item.submenu) translate(item.submenu);
+    }
+  };
+  translate(template);
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
@@ -488,7 +734,7 @@ ipcMain.handle('update:check', async () => {
     if (!res.ok) return { error: 'HTTP ' + res.status };
     const j = await res.json();
     const tag = String(j.tag_name || '').replace(/^v/, '');
-    if (!parseVer(tag)) return { error: '无法解析远端版本：' + tag };
+    if (!parseVer(tag)) return { error: t('invalidRemoteVersion') + tag };
     return { current: APP_VERSION_DISPLAY, latest: tag, latestDisplay: displayVer(tag), url: j.html_url, newer: isNewer(tag, APP_VERSION) };
   } catch (e) {
     return { error: (e && e.message) || '网络不可达' };
@@ -505,6 +751,83 @@ ipcMain.handle('fs:tree', async (e, dir) => {
     return { dirs: [], files: [] };
   }
 });
+ipcMain.handle('fs:articles', async (e, dir) => {
+  try {
+    const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    const items = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !MD_EXTS.has(path.extname(entry.name).toLowerCase())) continue;
+      const full = path.join(dir, entry.name);
+      const st = await fs.promises.stat(full);
+      items.push({ path: full, name: entry.name, mtime: st.mtimeMs });
+    }
+    return items.sort((a, b) => b.mtime - a.mtime || a.name.localeCompare(b.name, 'zh'));
+  } catch {
+    return [];
+  }
+});
+
+const SEARCH_SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'package', '.runtime', 'release']);
+async function searchMarkdown(dir, query, root, results, budget) {
+  if (results.length >= 200 || budget.files >= 2000) return;
+  let entries;
+  try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
+  entries.sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+  for (const entry of entries) {
+    if (results.length >= 200 || budget.files >= 2000) return;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (!entry.name.startsWith('.') && !SEARCH_SKIP_DIRS.has(entry.name)) await searchMarkdown(full, query, root, results, budget);
+      continue;
+    }
+    if (!entry.isFile() || !MD_EXTS.has(path.extname(entry.name).toLowerCase())) continue;
+    budget.files++;
+    try {
+      const st = await fs.promises.stat(full);
+      if (st.size > 2 * 1024 * 1024) continue;
+      const text = await fs.promises.readFile(full, 'utf8');
+      const lines = text.split(/\r?\n/);
+      for (let i = 0; i < lines.length && results.length < 200; i++) {
+        const at = lines[i].toLowerCase().indexOf(query.toLowerCase());
+        if (at < 0) continue;
+        results.push({
+          path: full,
+          name: path.relative(root, full).replace(/\\/g, '/'),
+          line: i + 1,
+          preview: lines[i].trim().slice(0, 180),
+        });
+        if (results.filter((x) => x.path === full).length >= 5) break;
+      }
+    } catch {}
+  }
+}
+ipcMain.handle('fs:search', async (e, dir, query) => {
+  if (typeof dir !== 'string' || typeof query !== 'string') return [];
+  const q = query.trim().slice(0, 200);
+  if (q.length < 2) return [];
+  const results = [];
+  await searchMarkdown(path.resolve(dir), q, path.resolve(dir), results, { files: 0 });
+  return results;
+});
+
+ipcMain.handle('html:imageData', async (e, p) => {
+  if (typeof p !== 'string') return null;
+  const mime = {
+    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
+    '.svg': 'image/svg+xml', '.webp': 'image/webp', '.bmp': 'image/bmp',
+  }[path.extname(p).toLowerCase()];
+  if (!mime) return null;
+  try { return `data:${mime};base64,` + (await fs.promises.readFile(p)).toString('base64'); }
+  catch { return null; }
+});
+
+ipcMain.handle('customCss:get', () => {
+  let css = '';
+  try { css = fs.readFileSync(customCssPath(), 'utf8'); } catch {}
+  return { enabled: config.customCssEnabled !== false, css: sanitizeCustomCss(css) };
+});
+ipcMain.handle('customCss:reload', () => { sendCustomCss(); return true; });
+
 ipcMain.handle('config:set', (e, patch) => {
   if (patch && typeof patch === 'object') {
     Object.assign(config, patch);
@@ -514,12 +837,24 @@ ipcMain.handle('config:set', (e, patch) => {
       buildMenu();
     }
     if (patch.zoom != null) applyZoom();
+    if (patch.spellcheck !== undefined) {
+      win?.webContents.session.setSpellCheckerLanguages(patch.spellcheck ? ['en-US'] : []);
+      win?.webContents.send('spellcheck:set', !!patch.spellcheck);
+    }
+    if (patch.language !== undefined) {
+      currentLanguage = resolvedLanguage();
+      buildMenu();
+      win?.webContents.send('language:set', currentLanguage);
+    }
+    if (patch.direction !== undefined) sendDirection();
+    if (patch.customCssEnabled !== undefined) sendCustomCss();
     if (patch.recent || patch.lastFile !== undefined) buildMenu();
   }
   return config;
 });
 ipcMain.handle('app:samplePath', () => path.join(ROOT, 'assets', 'sample.md'));
 ipcMain.handle('app:version', () => APP_VERSION_DISPLAY);
+ipcMain.handle('app:locale', () => currentLanguage);
 ipcMain.handle('dialog:image', async () => {
   const res = await dialog.showOpenDialog(win, {
     title: '选择图片',
@@ -537,9 +872,44 @@ ipcMain.handle('image:savePaste', async (e, payload) => {
   await fs.promises.writeFile(path.join(dir, name), Buffer.from(payload.b64, 'base64'));
   return { rel: 'assets/' + name, abs: path.join(dir, name) };
 });
+function parseCommandTemplate(template) {
+  const args = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let m;
+  while ((m = re.exec(template))) args.push(m[1] ?? m[2] ?? m[3]);
+  return args;
+}
+ipcMain.handle('image:upload', async (e, file) => {
+  if (typeof file !== 'string' || !fs.existsSync(file)) return { error: t('pathUnavailable') };
+  if (uploadMock) return { url: 'https://example.com/uploaded.png' };
+  const template = String(config.imageUploadCommand || '').trim();
+  if (!template) return { error: t('uploadNotConfigured') };
+  const parts = parseCommandTemplate(template);
+  if (!parts.length || !parts.some((x) => x.includes('{file}'))) return { error: t('uploadCommandInvalid') };
+  const exe = parts[0];
+  const args = parts.slice(1).map((x) => x.split('{file}').join(file));
+  return new Promise((resolve) => {
+    const child = spawn(exe, args, { shell: false, windowsHide: true });
+    let out = '';
+    let err = '';
+    const timer = setTimeout(() => { child.kill(); resolve({ error: t('uploadTimeout') }); }, 30000);
+    child.stdout.on('data', (d) => { out += d.toString(); });
+    child.stderr.on('data', (d) => { err += d.toString(); });
+    child.on('error', (e) => { clearTimeout(timer); resolve({ error: e.message }); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) { resolve({ error: err || ('exit ' + code) }); return; }
+      const match = out.match(/https?:\/\/[^\s'"<>]+/i);
+      resolve(match ? { url: match[0] } : { error: t('uploadNoUrl') });
+    });
+  });
+});
 ipcMain.handle('file:save', async (e, content) => {
   if (!currentFile || typeof content !== 'string') return { saved: false };
-  await fs.promises.writeFile(currentFile, content, 'utf8');
+  let previous = null;
+  try { previous = await fs.promises.readFile(currentFile, 'utf8'); } catch {}
+  if (previous !== null && previous !== content) await captureSnapshot(currentFile, previous);
+  await writeAtomic(currentFile, content);
   selfWrite = content;
   return { saved: true };
 });
@@ -687,6 +1057,7 @@ ipcMain.on('render:done', async (e, info) => {
     devRunStarted = true;
     setTimeout(async () => {
       try {
+        beginDevLanguageIsolation();
         if (dirtyExport && currentFile) {
           win.webContents.send('focus:set', true);
           win.webContents.send('typewriter:set', true);
@@ -1526,6 +1897,445 @@ ipcMain.on('render:done', async (e, info) => {
           console.log('ux test:', Object.values(r).every((v) => v === true) ? 'PASS' : 'FAIL', JSON.stringify(r));
           await resetUi();
         }
+        if (audit2Test && currentFile) {
+          const mainFile = currentFile;
+          const dir = path.join(ARTIFACT_DIR, 'audit2-fixture');
+          const a = path.join(dir, 'a.md');
+          const b = path.join(dir, 'b.md');
+          const c = path.join(dir, 'sub', 'c.md');
+          const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="860" height="120"><rect width="860" height="120" fill="#0969da"/><text x="20" y="70" fill="white" font-size="32">local image</text></svg>';
+          const src = '---\ntitle: 审计文档\nauthor: MarkView\n---\n\n# 中文标题\n\n==高亮== ++下划线++ ^上标^ ~下标~\n\n[跳到第二节](#第二节)\n\n## 第二节\n\n段落甲。\n\n```js\nconst value = 42;\n```\n\n| 列一 | 列二 |\n| --- | --- |\n| A | B |\n\n段落乙。\n\n![本地图](demo.svg)\n\n全局搜索 needle。\n\n[toc]\n';
+          await fs.promises.mkdir(path.dirname(c), { recursive: true });
+          await fs.promises.writeFile(path.join(dir, 'demo.svg'), svg, 'utf8');
+          await fs.promises.writeFile(a, src, 'utf8');
+          await fs.promises.writeFile(b, '# B\n\nneedle in b\n', 'utf8');
+          await fs.promises.writeFile(c, '# C\n\nneedle in c\n', 'utf8');
+          const ej = (js) => win.webContents.executeJavaScript(js);
+          const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+          const open = async (p) => { await ej(`window.api.openPath(${JSON.stringify(p)})`); await wait(1500); };
+          const r = {};
+          const check = async (name, fn) => {
+            try { r[name] = !!(await fn()); }
+            catch (err) { r[name] = false; r[name + 'Error'] = String(err && err.message || err); }
+          };
+          try {
+            await open(a);
+            await check('anchor', () => ej(
+              `(async () => { const h = [...document.querySelectorAll('#content h2')].find((x) => x.textContent === '第二节');
+                 if (!h) return false;
+                 for (let i = 0; i < 30; i++) { const p = document.createElement('p'); p.textContent = '填充 ' + i; h.before(p); }
+                 const link = document.querySelector('#content a[href^="#"]');
+                 link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true }));
+                 await new Promise((res) => setTimeout(res, 900));
+                 const sc = document.getElementById('scroll');
+                 return sc.scrollTop > 100 && Math.abs(h.getBoundingClientRect().top - sc.getBoundingClientRect().top) < 260; })()`
+            ));
+            await open(a);
+            await check('underline', async () => await ej(`!!document.querySelector('#content u')`) && (await fs.promises.readFile(a, 'utf8')).includes('++下划线++'));
+            await check('yaml', async () => await ej(`!!document.querySelector('#content .yaml-frontmatter')`) && (await fs.promises.readFile(a, 'utf8')).startsWith('---\ntitle:'));
+            await check('yamlEdit', async () => {
+              if (!await ej(`!!document.querySelector('#content .yaml-frontmatter')`)) return false;
+              await ej(`document.querySelector('#content .yaml-frontmatter').click()`);
+              await wait(400);
+              const opened = await ej(`!!document.querySelector('#content .yaml-frontmatter textarea.block-overlay')`);
+              if (!opened) return false;
+              await ej(
+                `(() => { const ta = document.querySelector('#content .yaml-frontmatter textarea.block-overlay');
+                   ta.value = ta.value.replace('MarkView', 'Changed');
+                   ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true })); return true; })()`
+              );
+              await wait(900);
+              const text = await fs.promises.readFile(a, 'utf8');
+              return text.startsWith('---\n') && text.includes('author: Changed') && text.includes('\n---\n');
+            });
+            await open(a);
+            await check('blockDrag', async () => {
+              const dragged = await ej(
+                `(() => { const ps = [...document.querySelectorAll('#content p[data-blk]')];
+                   const from = ps.find((p) => p.textContent.includes('段落甲'));
+                   const to = ps.find((p) => p.textContent.includes('段落乙'));
+                   if (!from || !to) return false;
+                   from.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+                   const handle = from.querySelector('.blk-drag');
+                   if (!handle) return false;
+                   const dt = new DataTransfer();
+                   handle.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt }));
+                   const ok = dt.types.includes('text/x-markview-block');
+                   to.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+                   return ok; })()`
+              );
+              await wait(900);
+              const text = await fs.promises.readFile(a, 'utf8');
+              return dragged && text.indexOf('段落乙') < text.indexOf('段落甲');
+            });
+            await open(a);
+            await check('targetCss', () => ej(`getComputedStyle(document.querySelector('#content h1')).scrollMarginTop === '14px'`));
+            await check('htmlImages', async () => {
+              const out = path.join(ARTIFACT_DIR, 'audit2-full.html');
+              await new Promise((resolve) => {
+                devHtmlResolve = resolve;
+                devHtmlTarget = out;
+                setTimeout(resolve, 15000);
+                win.webContents.send('html:prepare');
+              });
+              const html = await fs.promises.readFile(out, 'utf8');
+              return html.includes('data:image/svg+xml;base64,') && !/<img\b[^>]*\ssrc="demo\.svg"/.test(html);
+            });
+            await check('htmlBare', async () => {
+              const out = path.join(ARTIFACT_DIR, 'audit2-bare.html');
+              await new Promise((resolve) => {
+                devHtmlResolve = resolve;
+                devHtmlTarget = out;
+                setTimeout(resolve, 15000);
+                win.webContents.send('html:prepare-bare');
+              });
+              const html = await fs.promises.readFile(out, 'utf8');
+              return !html.includes('<style>') && html.includes('<u>') && html.includes('<h1');
+            });
+            await check('spellcheck', async () => {
+              const item = Menu.getApplicationMenu().getMenuItemById('spellcheck-toggle');
+              if (!item) return false;
+              const before = item.checked;
+              item.click();
+              await wait(500);
+              const cfg = await ej(`window.api.getConfig()`);
+              const dom = await ej(`document.getElementById('content').spellcheck === ${!before} && document.getElementById('editor').spellcheck === ${!before}`);
+              item.click();
+              await wait(300);
+              return item.checked === before && cfg.spellcheck === !before && dom;
+            });
+            await open(a);
+            await check('articles', async () => {
+              if (!await ej(`!!document.getElementById('tab-articles')`)) return false;
+              await ej(`document.getElementById('tab-articles').click()`);
+              await waitFor(() => ej(`document.querySelectorAll('#article-list .article-row').length === 2`), 3000);
+              const names = await ej(`[...document.querySelectorAll('#article-list .article-row')].map((x) => x.textContent.trim())`);
+              await ej(`[...document.querySelectorAll('#article-list .article-row')].find((x) => x.textContent.includes('b.md')).click()`);
+              await wait(900);
+              return names.join(',').includes('a.md') && names.join(',').includes('b.md') && await ej(`document.getElementById('file-title').textContent === 'b.md'`);
+            });
+            await open(a);
+            await check('globalSearch', async () => {
+              if (!await ej(`!!document.getElementById('tab-search')`)) return false;
+              await ej(`document.getElementById('tab-search').click()`);
+              await wait(300);
+              await ej(
+                `(() => { const i = document.querySelector('#global-search-input'); i.value = 'needle';
+                   i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`
+              );
+              await waitFor(() => ej(`document.querySelectorAll('#global-search-results .search-result').length >= 3`), 5000);
+              const paths = await ej(`[...document.querySelectorAll('#global-search-results .search-result')].map((x) => x.dataset.path || '')`);
+              await ej(`[...document.querySelectorAll('#global-search-results .search-result')].find((x) => (x.dataset.path || '').endsWith('c.md')).click()`);
+              await wait(900);
+              return paths.some((p) => p.endsWith('c.md')) && await ej(`document.getElementById('file-title').textContent === 'c.md'`);
+            });
+          } finally {
+            await open(mainFile);
+          }
+          console.log('audit2 test:', Object.values(r).every((v) => v === true) ? 'PASS' : 'FAIL', JSON.stringify(r));
+        }
+        if (audit3Test && currentFile) {
+          const mainFile = currentFile;
+          const dir = path.join(ARTIFACT_DIR, 'audit3-fixture');
+          const htmlFile = path.join(dir, 'emoji-html.md');
+          const resizeFile = path.join(dir, 'resize.md');
+          const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"><rect width="640" height="360" fill="#0969da"/></svg>';
+          const htmlSrc = '# Emoji\n\n:smile: :rocket:\n\n<div class="note" onclick="alert(1)">安全 <strong>HTML</strong><script>alert(1)</script><img src="demo.svg" onerror="alert(1)" width="120"></div>\n\n<table class="raw"><tr><td>A</td><td>B</td></tr></table>\n\n普通段落。\n';
+          const resizeSrc = '# 图片缩放\n\n![缩放图](demo.svg)\n';
+          await fs.promises.mkdir(dir, { recursive: true });
+          await fs.promises.writeFile(path.join(dir, 'demo.svg'), svg, 'utf8');
+          await fs.promises.writeFile(htmlFile, htmlSrc, 'utf8');
+          await fs.promises.writeFile(resizeFile, resizeSrc, 'utf8');
+          const ej = (js) => win.webContents.executeJavaScript(js);
+          const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+          const open = async (p) => { await ej(`window.api.openPath(${JSON.stringify(p)})`); await wait(1200); };
+          const r = {};
+          const check = async (name, fn) => {
+            try { r[name] = !!(await fn()); }
+            catch (err) { r[name] = false; r[name + 'Error'] = String(err && err.message || err); }
+          };
+          try {
+            await open(htmlFile);
+            await check('emoji', () => ej(`document.querySelectorAll('#content .emoji').length >= 2`));
+            await check('sanitize', () => ej(
+              `(() => { const note = document.querySelector('#content .note'); return !!note && !note.querySelector('script') &&
+                 !note.hasAttribute('onclick') && !note.querySelector('img').hasAttribute('onerror'); })()`
+            ));
+            await check('emojiRoundtrip', async () => {
+              await ej(
+                `(() => { const p = [...document.querySelectorAll('#content p[data-blk]')].find((x) => x.textContent.includes('普通段落'));
+                   const tn = [...p.childNodes].find((n) => n.nodeType === 3);
+                   document.getElementById('content').focus(); const rg = document.createRange(); rg.setStart(tn, 0); rg.collapse(true);
+                   const s = document.getSelection(); s.removeAllRanges(); s.addRange(rg);
+                   document.execCommand('insertText', false, 'X'); return true; })()`
+              );
+              await wait(1000);
+              const text = await fs.promises.readFile(htmlFile, 'utf8');
+              return text.includes(':smile: :rocket:') && text.includes('X普通段落');
+            });
+            await check('safeHtmlRoundtrip', async () => {
+              const text = await fs.promises.readFile(htmlFile, 'utf8');
+              return text.includes('<div class="note">') && text.includes('<strong>HTML</strong>') && text.includes('src="demo.svg"') && text.includes('<table class="raw">') && text.includes('<td>A</td>') && !text.includes('file:') && !text.includes('onclick') && !text.includes('onerror') && !text.includes('<script>');
+            });
+            await open(resizeFile);
+            await check('resizeHandle', () => ej(`!!document.querySelector('#content .img-resize-handle')`));
+            await check('imageResize', async () => {
+              const ok = await ej(
+                `(() => { const img = [...document.querySelectorAll('#content img')].find((i) => !i.classList.contains('emoji'));
+                   const handle = img && img.parentElement.querySelector('.img-resize-handle'); if (!handle) return false;
+                   const r = img.getBoundingClientRect();
+                   handle.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 7, clientX: r.right, clientY: r.bottom }));
+                   window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 7, clientX: r.right + 160, clientY: r.bottom + 90 }));
+                   window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 7, clientX: r.right + 160, clientY: r.bottom + 90 }));
+                   return true; })()`
+              );
+              await wait(1000);
+              const text = await fs.promises.readFile(resizeFile, 'utf8');
+              return ok && /<img\b[^>]*width="\d+"/.test(text) && /<img\b[^>]*height="\d+"/.test(text);
+            });
+            await check('resizeExport', async () => {
+              const out = path.join(ARTIFACT_DIR, 'audit3-resize.html');
+              await new Promise((resolve) => {
+                devHtmlResolve = resolve;
+                devHtmlTarget = out;
+                setTimeout(resolve, 15000);
+                win.webContents.send('html:prepare');
+              });
+              const html = await fs.promises.readFile(out, 'utf8');
+              return /<img\b[^>]*width="\d+"/.test(html) && !/<button[^>]*img-resize-handle/.test(html);
+            });
+            await check('resizeUndo', async () => {
+              win.webContents.send('menu:undo');
+              await wait(1000);
+              return (await fs.promises.readFile(resizeFile, 'utf8')) === resizeSrc;
+            });
+          } finally {
+            await open(mainFile);
+          }
+          console.log('audit3 test:', Object.values(r).every((v) => v === true) ? 'PASS' : 'FAIL', JSON.stringify(r));
+        }
+        if (audit4Test && currentFile) {
+          const mainFile = currentFile;
+          const cssPath = path.join(app.getPath('userData'), 'custom.css');
+          const oldCss = fs.existsSync(cssPath) ? fs.readFileSync(cssPath, 'utf8') : null;
+          const oldCfg = { language: config.language, direction: config.direction, customCssEnabled: config.customCssEnabled };
+          const rtlFile = path.join(ARTIFACT_DIR, 'audit4-rtl.md');
+          await fs.promises.writeFile(rtlFile, '# RTL\n\nمرحبا بالعالم\n\nEnglish paragraph\n', 'utf8');
+          await fs.promises.writeFile(cssPath, '@import url("https://example.com/evil.css");\n.markdown-body { color: rgb(1, 2, 3); }\n', 'utf8');
+          const ej = (js) => win.webContents.executeJavaScript(js);
+          const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+          const open = async (p) => { await ej(`window.api.openPath(${JSON.stringify(p)})`); await wait(1200); };
+          const r = {};
+          const check = async (name, fn) => {
+            try { r[name] = !!(await fn()); }
+            catch (err) { r[name] = false; r[name + 'Error'] = String(err && err.message || err); }
+          };
+          try {
+            win.webContents.send('customCss:reload');
+            await wait(600);
+            await check('customCss', () => ej(
+              `(() => { const s = document.getElementById('custom-theme'); return !!s && s.textContent.includes('rgb(1, 2, 3)') &&
+                 !s.textContent.includes('@import') && !s.textContent.includes('example.com') &&
+                 getComputedStyle(document.getElementById('content')).color === 'rgb(1, 2, 3)'; })()`
+            ));
+            await check('customCssToggle', async () => {
+              const item = Menu.getApplicationMenu().getMenuItemById('custom-css-toggle');
+              if (!item) return false;
+              if (!item.checked) item.click();
+              await wait(400);
+              item.click();
+              await wait(400);
+              const off = await ej(`getComputedStyle(document.getElementById('content')).color !== 'rgb(1, 2, 3)'`);
+              item.click();
+              await wait(400);
+              const cfg = await ej(`window.api.getConfig()`);
+              return off && item.checked && cfg.customCssEnabled === true;
+            });
+            await check('customCssExport', async () => {
+              const out = path.join(ARTIFACT_DIR, 'audit4-custom.html');
+              await new Promise((resolve) => {
+                devHtmlResolve = resolve;
+                devHtmlTarget = out;
+                setTimeout(resolve, 15000);
+                win.webContents.send('html:prepare');
+              });
+              const html = await fs.promises.readFile(out, 'utf8');
+              return html.includes('rgb(1, 2, 3)') && !html.includes('@import') && !html.includes('example.com');
+            });
+            await check('languageEn', async () => {
+              const zh = Menu.getApplicationMenu().getMenuItemById('language-zh');
+              if (!zh) return false;
+              zh.click();
+              await wait(400);
+              const enNow = Menu.getApplicationMenu().getMenuItemById('language-en');
+              if (!enNow) return false;
+              enNow.click();
+              await wait(600);
+              const dom = await ej(`document.documentElement.lang === 'en-US' && document.getElementById('tab-toc').textContent === 'Outline' && document.getElementById('btn-open').title.includes('Open')`);
+              const menu = Menu.getApplicationMenu().items.some((x) => x.label === 'File');
+              const cfg = await ej(`window.api.getConfig()`);
+              return dom && menu && cfg.language === 'en-US';
+            });
+            await check('updateEnglish', async () => {
+              win.webContents.send('menu:check-update');
+              await wait(250);
+              const text = await ej(`document.getElementById('toast').textContent`);
+              return text.length > 0 && !/[\u4e00-\u9fff]/.test(text);
+            });
+            await check('englishUi', () => ej(
+              `(() => { const skip = 'script, style, #content, #editor, #toc, #file-title, #stat-file, .status-path, .article-row, .search-result, .recent-item, .tree-name, .tree-root, .tree-row';
+                 const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, { acceptNode(n) {
+                   const p = n.parentElement; if (!p || p.closest(skip)) return NodeFilter.FILTER_REJECT;
+                   return /[\\u4e00-\\u9fff]/.test(n.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT; } });
+                 const out = []; let n; while ((n = w.nextNode()) && out.length < 40) { const s = n.nodeValue.trim(); if (s && !out.includes(s)) out.push(s); }
+                 for (const el of document.querySelectorAll('body *')) {
+                   if (el.closest(skip)) continue;
+                   for (const attr of ['title', 'placeholder', 'aria-label']) {
+                     const value = (el.getAttribute(attr) || '').trim();
+                     if (/[\\u4e00-\\u9fff]/.test(value) && !out.includes(value)) out.push(attr + ':' + value);
+                   }
+                 }
+                 window.__uiZhLeft = out; return out.length === 0; })()`
+            ));
+            if (r.englishUi === false) console.log('ui zh left:', JSON.stringify(await ej(`window.__uiZhLeft`)));
+            await check('languageZh', async () => {
+              Menu.getApplicationMenu().getMenuItemById('language-zh')?.click();
+              await wait(600);
+              return await ej(`document.documentElement.lang === 'zh-CN' && document.getElementById('tab-toc').textContent === '大纲'`);
+            });
+            await open(rtlFile);
+            await ej(`window.api.setConfig({ direction: 'auto' })`);
+            await wait(500);
+            await check('rtlAuto', () => ej(`document.getElementById('content').dir === 'rtl' && getComputedStyle(document.getElementById('content')).direction === 'rtl'`));
+            await check('rtlManual', async () => {
+              const ltr = Menu.getApplicationMenu().getMenuItemById('direction-ltr');
+              const auto = Menu.getApplicationMenu().getMenuItemById('direction-auto');
+              const rtl = Menu.getApplicationMenu().getMenuItemById('direction-rtl');
+              if (!ltr || !auto || !rtl) return false;
+              ltr.click();
+              await wait(400);
+              const left = await ej(`document.getElementById('content').dir === 'ltr'`);
+              auto.click();
+              await wait(400);
+              const detected = await ej(`document.getElementById('content').dir === 'rtl'`);
+              await open(mainFile);
+              rtl.click();
+              await wait(400);
+              const forced = await ej(`document.getElementById('content').dir === 'rtl'`);
+              auto.click();
+              await wait(300);
+              return left && detected && forced;
+            });
+          } finally {
+            if (oldCss === null) fs.rmSync(cssPath, { force: true });
+            else fs.writeFileSync(cssPath, oldCss, 'utf8');
+            await ej(`window.api.setConfig(${JSON.stringify(oldCfg)})`);
+            win.webContents.send('customCss:reload');
+            await open(mainFile);
+          }
+          console.log('audit4 test:', Object.values(r).every((v) => v === true) ? 'PASS' : 'FAIL', JSON.stringify(r));
+        }
+        if (audit5Test && currentFile) {
+          const mainFile = currentFile;
+          const dir = path.join(ARTIFACT_DIR, 'audit5-fixture');
+          const doc = path.join(dir, 'history.md');
+          const imageDoc = path.join(dir, 'image.md');
+          const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="80"><rect width="200" height="80" fill="#0969da"/></svg>';
+          await fs.promises.mkdir(dir, { recursive: true });
+          await fs.promises.writeFile(path.join(dir, 'demo.svg'), svg, 'utf8');
+          await fs.promises.writeFile(doc, '# 版本\n\nv1\n', 'utf8');
+          await fs.promises.writeFile(imageDoc, '# 图片\n\n![图](demo.svg)\n', 'utf8');
+          const ej = (js) => win.webContents.executeJavaScript(js);
+          const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+          const open = async (p) => { await ej(`window.api.openPath(${JSON.stringify(p)})`); await wait(1000); };
+          const saveText = async (text) => {
+            if (!await ej(`document.body.classList.contains('edit-mode')`)) win.webContents.send('menu:toggle-edit');
+            await wait(400);
+            await ej(`(() => { const e = document.getElementById('editor'); e.value = ${JSON.stringify(text)}; e.dispatchEvent(new Event('input')); return true; })()`);
+            win.webContents.send('menu:save');
+            await wait(700);
+          };
+          const leaveSource = async () => { if (await ej(`document.body.classList.contains('edit-mode')`)) { win.webContents.send('menu:toggle-edit'); await wait(500); } };
+          const oldCfg = { snapshotEnabled: config.snapshotEnabled, snapshotMax: config.snapshotMax, snapshotDays: config.snapshotDays, pandocPath: config.pandocPath, imageUploadCommand: config.imageUploadCommand };
+          const r = {};
+          const check = async (name, fn) => {
+            try { r[name] = !!(await fn()); }
+            catch (err) { r[name] = false; r[name + 'Error'] = String(err && err.message || err); }
+          };
+          try {
+            await ej(`window.api.setConfig({ snapshotEnabled: true, snapshotMax: 50, snapshotDays: 30 })`);
+            await open(doc);
+            await saveText('# 版本\n\nv2\n');
+            await leaveSource();
+            let list = [];
+            try { list = await ej(`window.api.historyList(${JSON.stringify(doc)})`); } catch {}
+            await check('snapshotCreate', () => Array.isArray(list) && list.length >= 1 && list.some((x) => (x.preview || '').includes('v1')));
+            const count = Array.isArray(list) ? list.length : 0;
+            win.webContents.send('menu:save');
+            await wait(600);
+            try { list = await ej(`window.api.historyList(${JSON.stringify(doc)})`); } catch { list = []; }
+            await check('snapshotDedupe', () => Array.isArray(list) && list.length === count);
+            await check('snapshotRestore', async () => {
+              const item = list && list[0];
+              if (!item) return false;
+              await ej(`window.api.historyRestore(${JSON.stringify(doc)}, ${JSON.stringify(item.id)})`);
+              await wait(800);
+              return (await fs.promises.readFile(doc, 'utf8')).includes('v1');
+            });
+            await check('snapshotRetention', async () => {
+              await ej(`window.api.setConfig({ snapshotMax: 3 })`);
+              for (let i = 3; i <= 7; i++) { await saveText(`# 版本\n\nv${i}\n`); await leaveSource(); }
+              const items = await ej(`window.api.historyList(${JSON.stringify(doc)})`);
+              return Array.isArray(items) && items.length <= 3;
+            });
+            await check('historyUi', async () => {
+              const item = Menu.getApplicationMenu().getMenuItemById('history-open');
+              if (!item) return false;
+              item.click();
+              await wait(500);
+              const opened = await ej(`!!document.querySelector('.history-modal:not([hidden])')`);
+              await ej(`(() => { const b = [...document.querySelectorAll('.history-modal:not([hidden]) button')].find((x) => x.textContent === '关闭'); if (b) b.click(); return true; })()`);
+              return opened;
+            });
+            await check('pandocStatus', () => ej(`window.api.pandocStatus().then((x) => x.available === true)`));
+            await check('pandocExport', async () => {
+              const out = path.join(ARTIFACT_DIR, 'audit5.docx');
+              devPandocTarget = out;
+              const item = Menu.getApplicationMenu().getMenuItemById('pandoc-docx');
+              if (!item) return false;
+              item.click();
+              await wait(1500);
+              return fs.existsSync(out) && fs.statSync(out).size > 0;
+            });
+            await ej(`window.api.setConfig({ imageUploadCommand: 'mock-upload {file}' })`);
+            await open(imageDoc);
+            await check('imageUpload', async () => {
+              await ej(`document.querySelector('#content img').click()`);
+              await wait(500);
+              const btn = await ej(`!!document.querySelector('.link-modal:not([hidden]) .upload-image-btn')`);
+              if (!btn) return false;
+              await ej(`document.querySelector('.link-modal:not([hidden]) .upload-image-btn').click()`);
+              await wait(1200);
+              const text = await fs.promises.readFile(imageDoc, 'utf8');
+              const closed = await ej(`!document.querySelector('.link-modal:not([hidden])')`);
+              return text.includes('https://example.com/uploaded.png') && closed;
+            });
+            await check('integrationSettings', async () => {
+              const item = Menu.getApplicationMenu().getMenuItemById('integration-settings');
+              if (!item) return false;
+              item.click();
+              await wait(500);
+              const ok = await ej(`!!document.querySelector('.integration-modal:not([hidden]) #pandoc-path-input') && !!document.querySelector('.integration-modal:not([hidden]) #upload-command-input')`);
+              await ej(`(() => { const b = [...document.querySelectorAll('.integration-modal:not([hidden]) button')].find((x) => x.textContent === '关闭'); if (b) b.click(); return true; })()`);
+              return ok;
+            });
+          } finally {
+            devPandocTarget = null;
+            await ej(`window.api.setConfig(${JSON.stringify(oldCfg)})`);
+            await open(mainFile);
+          }
+          console.log('audit5 test:', Object.values(r).every((v) => v === true) ? 'PASS' : 'FAIL', JSON.stringify(r));
+        }
         if (edgeTest && currentFile) {
           const mainFile = currentFile;
           const orig = await fs.promises.readFile(mainFile, 'utf8');
@@ -1947,6 +2757,7 @@ ipcMain.on('render:done', async (e, info) => {
             await fs.promises.writeFile(path.resolve(capturePath), img.toPNG());
           }
           await fs.promises.writeFile(currentFile, orig);
+          restoreDevLanguageIsolation();
           app.quit();
           return;
         }
@@ -2033,6 +2844,7 @@ ipcMain.on('render:done', async (e, info) => {
       } catch (err) {
         console.error('dev capture failed:', err);
       }
+      restoreDevLanguageIsolation();
       app.quit();
     }, 1500);
   }
@@ -2053,6 +2865,8 @@ if (!gotLock) {
 
   app.whenReady().then(() => {
     loadConfig();
+    currentLanguage = resolvedLanguage();
+    ensureCustomCss();
     if (themeFlag && THEME_BG[themeFlag]) config.theme = themeFlag;
     if (fontFlag === 'serif' || fontFlag === 'sans') config.font = fontFlag;
     createWindow();

@@ -21,9 +21,16 @@ const buffers = sizes.map((size) => {
 });
 
 fs.mkdirSync(path.join(root, 'assets'), { recursive: true });
-fs.writeFileSync(path.join(root, 'assets', 'icon.png'), buffers[buffers.length - 1]);
+const icnsSizes = [16, 32, 64, 128, 256, 512, 1024];
+const icnsBuffers = icnsSizes.map((size) => {
+  const canvas = createCanvas(size, size);
+  canvas.getContext('2d').drawImage(img, 0, 0, size, size);
+  return canvas.toBuffer('image/png');
+});
+fs.writeFileSync(path.join(root, 'assets', 'icon.png'), icnsBuffers[5]);
 fs.writeFileSync(path.join(root, 'assets', 'icon.ico'), pngIco(buffers, sizes));
-console.log('icon.ico written:', sizes.join(','));
+fs.writeFileSync(path.join(root, 'assets', 'icon.icns'), pngIcns(icnsBuffers));
+console.log('icons written: ico', sizes.join(','), '· icns', icnsSizes.join(','));
 
 // ICO container with PNG-compressed entries (Vista+); avoids an extra dependency.
 function pngIco(pngs, dims) {
@@ -45,4 +52,19 @@ function pngIco(pngs, dims) {
     offset += buf.length;
   });
   return Buffer.concat([head, entries, ...pngs]);
+}
+
+// ICNS container with PNG chunks (modern macOS).
+function pngIcns(pngs) {
+  const types = ['icp4', 'icp5', 'icp6', 'ic07', 'ic08', 'ic09', 'ic10'];
+  const chunks = pngs.map((buf, i) => {
+    const head = Buffer.alloc(8);
+    head.write(types[i], 0, 4, 'ascii');
+    head.writeUInt32BE(buf.length + 8, 4);
+    return Buffer.concat([head, buf]);
+  });
+  const head = Buffer.alloc(8);
+  head.write('icns', 0, 4, 'ascii');
+  head.writeUInt32BE(8 + chunks.reduce((n, c) => n + c.length, 0), 4);
+  return Buffer.concat([head, ...chunks]);
 }

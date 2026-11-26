@@ -3,6 +3,11 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+if (process.platform !== 'win32') {
+  console.log('解除关联脚本仅支持 Windows；macOS/Linux 请在系统设置中移除关联。');
+  process.exit(0);
+}
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const stableDir = path.join(process.env.LOCALAPPDATA, 'MarkView');
 

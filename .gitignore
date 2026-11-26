@@ -6,6 +6,7 @@ package*/
 test/output/
 assets/icon.ico
 assets/icon.png
+assets/icon.icns
 *.log
 .DS_Store
 Thumbs.db

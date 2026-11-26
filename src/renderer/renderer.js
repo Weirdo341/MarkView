@@ -2,6 +2,10 @@ import MarkdownIt from 'markdown-it';
 import anchor from 'markdown-it-anchor';
 import footnote from 'markdown-it-footnote';
 import taskLists from 'markdown-it-task-lists';
+import { full as emoji } from 'markdown-it-emoji';
+import DOMPurify from 'dompurify';
+import ZH from '../locales/zh-CN.json';
+import EN from '../locales/en-US.json';
 import hljs from 'highlight.js/lib/core';
 import javascript from 'highlight.js/lib/languages/javascript';
 import typescript from 'highlight.js/lib/languages/typescript';
@@ -51,13 +55,147 @@ const THEMES = ['light', 'dark', 'sepia'];
 const THEME_LABEL = { light: '浅色', dark: '深色', sepia: '护眼' };
 const MERMAID_THEME = { light: 'default', dark: 'dark', sepia: 'neutral' };
 
-const md = new MarkdownIt({ html: false, linkify: true, typographer: false, breaks: false })
+let currentLanguage = 'zh-CN';
+let translatingUi = false;
+const ZH_TO_KEY = new Map(Object.entries(ZH).map(([key, value]) => [value, key]));
+const UI_PHRASES = Object.entries(ZH)
+  .filter(([, value]) => /[\u4e00-\u9fff]/.test(value))
+  .sort((a, b) => b[1].length - a[1].length);
+function t(key) {
+  return (currentLanguage === 'en-US' ? EN : ZH)[key] || ZH[key] || key;
+}
+function tf(key, vars = {}) {
+  let out = t(key);
+  for (const [name, value] of Object.entries(vars)) out = out.replaceAll('{' + name + '}', String(value));
+  return out;
+}
+function tText(text) {
+  if (currentLanguage !== 'en-US' || typeof text !== 'string') return text;
+  const key = ZH_TO_KEY.get(text);
+  return key ? EN[key] || text : text;
+}
+function tUiText(text) {
+  if (currentLanguage !== 'en-US' || typeof text !== 'string') return text;
+  let out = text;
+  for (const [key, zh] of UI_PHRASES) {
+    if (out.includes(zh)) out = out.split(zh).join(EN[key] || zh);
+  }
+  return out;
+}
+function translateUi(root = document.body) {
+  if (root.nodeType === Node.TEXT_NODE) {
+    if (root.parentElement?.closest('#content, #editor, .article-row, .search-result')) return;
+    const raw = root.nodeValue;
+    const trimmed = raw.trim();
+    const translated = tUiText(trimmed);
+    if (translated !== trimmed) {
+      const lead = raw.slice(0, raw.indexOf(trimmed));
+      const tail = raw.slice(raw.indexOf(trimmed) + trimmed.length);
+      root.nodeValue = lead + translated + tail;
+    }
+    return;
+  }
+  if (root.nodeType !== Node.ELEMENT_NODE) return;
+  if (root.id === 'content' || root.id === 'editor' || root.closest('#content, #editor, .article-row, .search-result')) return;
+  const elements = [root, ...root.querySelectorAll('*')];
+  for (const el of elements) {
+    if (el.id === 'content' || el.id === 'editor' || el.closest('#content, #editor, .article-row, .search-result')) continue;
+    if (el.dataset.i18n) {
+      const value = t(el.dataset.i18n);
+      if (el.textContent !== value) el.textContent = value;
+    }
+    for (const attr of ['title', 'placeholder', 'aria-label']) {
+      const key = el.dataset['i18n' + attr[0].toUpperCase() + attr.slice(1)];
+      if (key) {
+        const value = t(key);
+        if (el.getAttribute(attr) !== value) el.setAttribute(attr, value);
+      } else if (el.hasAttribute(attr)) {
+        const value = tUiText(el.getAttribute(attr));
+        if (value !== el.getAttribute(attr)) el.setAttribute(attr, value);
+      }
+    }
+  }
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(n) {
+      return n.parentElement?.closest('#content, #editor, .article-row, .search-result') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  let node;
+  while ((node = walker.nextNode())) translateUi(node);
+}
+function applyLanguage(lang) {
+  currentLanguage = lang === 'en-US' ? 'en-US' : 'zh-CN';
+  document.documentElement.lang = currentLanguage;
+  translatingUi = true;
+  translateUi(document.body);
+  translatingUi = false;
+  if (typeof updateStats === 'function') updateStats();
+  if (typeof updateSaveStatus === 'function') updateSaveStatus();
+}
+function bindLanguageObserver() {
+  new MutationObserver((mutations) => {
+    if (translatingUi) return;
+    translatingUi = true;
+    for (const mutation of mutations) {
+      if (mutation.type === 'attributes') translateUi(mutation.target);
+      else mutation.addedNodes.forEach((node) => translateUi(node));
+    }
+    translatingUi = false;
+  }).observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['title', 'placeholder', 'aria-label'] });
+}
+function applyCustomCss(payload) {
+  const style = document.getElementById('custom-theme');
+  style.textContent = payload && payload.enabled ? payload.css || '' : '';
+  style.disabled = !(payload && payload.enabled);
+}
+function applyDirection(mode) {
+  state.directionMode = mode || 'auto';
+  const rtl = state.directionMode === 'rtl' || (state.directionMode === 'auto' && /[\u0590-\u08ff]/.test(contentEl.textContent || ''));
+  const dir = rtl ? 'rtl' : 'ltr';
+  contentEl.dir = dir;
+  editor.dir = dir;
+  contentEl.classList.toggle('rtl', rtl);
+  state.direction = dir;
+}
+
+const md = new MarkdownIt({ html: true, linkify: true, typographer: false, breaks: false })
   .use(anchor, {
     slugify: (s) => encodeURIComponent(String(s).trim().toLowerCase().replace(/\s+/g, '-')),
     uniqueSlugStartIndex: 1,
   })
   .use(footnote)
-  .use(taskLists, { enabled: false, label: true, labelAfter: true });
+  .use(taskLists, { enabled: false, label: true, labelAfter: true })
+  .use(emoji, { shortcuts: {} });
+md.renderer.rules.emoji = (tokens, i) =>
+  `<span class="emoji" data-emoji=":${tokens[i].markup}:">${tokens[i].content}</span>`;
+
+const HTML_TAGS = [
+  'a','abbr','b','blockquote','br','caption','cite','code','col','colgroup','dd','del','details','div','dl','dt',
+  'em','figcaption','figure','h1','h2','h3','h4','h5','h6','hr','i','img','input','kbd','li','mark','ol','p','pre',
+  'q','s','samp','small','span','strong','sub','summary','sup','table','tbody','td','tfoot','th','thead','tr','u','ul','var',
+];
+const HTML_ATTRS = [
+  'class','id','title','alt','src','href','width','height','colspan','rowspan','align','start','type','open','controls','poster','datetime','cite','checked','disabled',
+];
+function sanitizeHtmlToken(content) {
+  const template = document.createElement('template');
+  template.innerHTML = content;
+  const clean = DOMPurify.sanitize(template.content, {
+    RETURN_DOM_FRAGMENT: true,
+    ALLOWED_TAGS: HTML_TAGS,
+    ALLOWED_ATTR: HTML_ATTRS,
+    ALLOW_DATA_ATTR: true,
+    ALLOW_ARIA_ATTR: true,
+    FORBID_ATTR: ['style'],
+  });
+  clean.querySelectorAll('input').forEach((el) => { if (el.getAttribute('type') !== 'checkbox') el.remove(); });
+  clean.querySelectorAll('*').forEach((el) => el.setAttribute('data-mv-html', '1'));
+  const box = document.createElement('div');
+  box.append(clean);
+  return box.innerHTML;
+}
+md.renderer.rules.html_inline = (tokens, i) => sanitizeHtmlToken(tokens[i].content);
+md.renderer.rules.html_block = (tokens, i) => sanitizeHtmlToken(tokens[i].content);
 
 md.inline.ruler.before('text', 'color', (state, silent) => {
   const m = /^\{([a-zA-Z]{3,20}|#[0-9a-fA-F]{3,8})\}\(/.exec(state.src.slice(state.pos));
@@ -83,7 +221,7 @@ md.inline.ruler.before('text', 'color', (state, silent) => {
 md.renderer.rules.color_open = (tokens, i) => `<span style="color:${tokens[i].attrGet('data-color')}" data-color="${tokens[i].attrGet('data-color')}">`;
 md.renderer.rules.color_close = () => '</span>';
 
-const EXT_PAIRS = [['==', 'mark'], ['^', 'sup'], ['~', 'sub']];
+const EXT_PAIRS = [['==', 'mark'], ['++', 'u'], ['^', 'sup'], ['~', 'sub']];
 function mathRegionAt(src, pos, env) {
   const cache = (env.__mathCache || (env.__mathCache = new Map()));
   let regions = cache.get(src);
@@ -150,6 +288,26 @@ md.block.ruler.before('paragraph', 'toc_inline', (state, startLine, endLine, sil
   return true;
 }, { alt: ['paragraph', 'reference', 'blockquote', 'list'] });
 md.renderer.rules.toc_inline = (tokens, i) => `<nav class="toc-inline" data-toc-src="${tokens[i].meta.src}"></nav>`;
+
+md.block.ruler.before('hr', 'yaml_frontmatter', (state, startLine, endLine, silent) => {
+  if (startLine !== 0) return false;
+  const firstPos = state.bMarks[startLine] + state.tShift[startLine];
+  if (state.src.slice(firstPos, state.eMarks[startLine]).trim() !== '---') return false;
+  let close = -1;
+  for (let i = startLine + 1; i < endLine; i++) {
+    const pos = state.bMarks[i] + state.tShift[i];
+    if (/^(---|\.\.\.)\s*$/.test(state.src.slice(pos, state.eMarks[i]))) { close = i; break; }
+  }
+  if (close < 0) return false;
+  if (silent) return true;
+  const tok = state.push('yaml_frontmatter', 'div', 0);
+  tok.map = [startLine, close + 1];
+  tok.content = state.src.split('\n').slice(startLine, close + 1).join('\n');
+  state.line = close + 1;
+  return true;
+});
+md.renderer.rules.yaml_frontmatter = (tokens, i) =>
+  `<div class="yaml-frontmatter" contenteditable="false"><div class="yaml-label">YAML</div><pre>${md.utils.escapeHtml(tokens[i].content)}</pre></div>`;
 
 md.block.ruler.before('paragraph', 'table_config', (state, startLine, endLine, silent) => {
   const pos = state.bMarks[startLine] + state.tShift[startLine];
@@ -300,6 +458,7 @@ async function doRender(text, { preserve = false } = {}) {
   buildToc();
   fillInlineToc();
   tagBlocks();
+  applyDirection(state.directionMode || 'auto');
   updateStats();
 
   if (preserve) {
@@ -327,8 +486,53 @@ async function doRender(text, { preserve = false } = {}) {
   api.renderDone({ hasFile: true });
 }
 
+let imageResizeDrag = null;
+function bindImageResizeTools() {
+  contentEl.addEventListener('pointerdown', (e) => {
+    const handle = e.target.closest('.img-resize-handle');
+    if (!handle || state.edit) return;
+    const img = handle.parentElement.querySelector('img');
+    if (!img) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = img.getBoundingClientRect();
+    imageResizeDrag = {
+      img,
+      x: e.clientX,
+      y: e.clientY,
+      w: rect.width || img.naturalWidth || 640,
+      h: rect.height || img.naturalHeight || 360,
+    };
+    img.classList.add('resizing');
+  });
+  window.addEventListener('pointermove', (e) => {
+    if (!imageResizeDrag) return;
+    const { img, x, y, w, h } = imageResizeDrag;
+    const width = Math.max(80, Math.min(2000, w + e.clientX - x));
+    const height = Math.max(45, Math.min(2000, width * h / Math.max(1, w)));
+    img.style.width = width + 'px';
+    img.style.height = height + 'px';
+  });
+  window.addEventListener('pointerup', () => {
+    if (!imageResizeDrag) return;
+    const { img } = imageResizeDrag;
+    const width = Math.round(parseFloat(img.style.width) || img.naturalWidth || 640);
+    const height = Math.round(parseFloat(img.style.height) || img.naturalHeight || 360);
+    img.dataset.width = String(width);
+    img.dataset.height = String(height);
+    img.setAttribute('width', String(width));
+    img.setAttribute('height', String(height));
+    img.style.width = '';
+    img.style.height = '';
+    img.classList.remove('resizing');
+    imageResizeDrag = null;
+    commitLive();
+  });
+}
+
 function fixImages() {
   for (const img of contentEl.querySelectorAll('img')) {
+    if (img.classList.contains('emoji')) continue;
     const src = img.getAttribute('src') || '';
     if (!/^(https?:|data:|file:)/i.test(src) && state.dir) {
       let decoded = src;
@@ -340,10 +544,27 @@ function fixImages() {
       const note = document.createElement('span');
       note.className = 'img-broken';
       note.textContent = `图片加载失败：${img.getAttribute('alt') || src}`;
+      const wrap = img.parentElement;
       img.replaceWith(note);
+      if (wrap && wrap.classList.contains('img-resize-wrap')) wrap.remove();
     }, { once: true });
+    if (!img.parentElement.classList.contains('img-resize-wrap')) {
+      const wrap = document.createElement('span');
+      wrap.className = 'img-resize-wrap';
+      wrap.contentEditable = 'false';
+      img.replaceWith(wrap);
+      wrap.append(img);
+      const handle = document.createElement('button');
+      handle.type = 'button';
+      handle.className = 'img-resize-handle';
+      handle.title = '拖拽调整图片大小';
+      handle.textContent = '◢';
+      handle.addEventListener('mousedown', (e) => e.stopPropagation());
+      handle.addEventListener('click', (e) => e.stopPropagation());
+      wrap.append(handle);
+    }
     img.draggable = true;
-    img.title = '点击配置图片 · 拖拽移动位置';
+    img.title = '点击配置图片 · 拖拽移动位置 · 右下角拖拽缩放';
   }
 }
 
@@ -352,6 +573,7 @@ function wrapTables() {
     if (table.parentElement.classList.contains('table-wrap')) continue;
     const wrap = document.createElement('div');
     wrap.className = 'table-wrap';
+    if (table.hasAttribute('data-mv-html')) wrap.dataset.mvRawTable = '1';
     table.replaceWith(wrap);
     wrap.append(table);
   }
@@ -516,7 +738,13 @@ function fillInlineToc() {
 }
 
 function scrollToHeading(id) {
-  const el = document.getElementById(id);
+  let el = document.getElementById(id);
+  if (!el) {
+    try { el = document.getElementById(encodeURIComponent(id)); } catch {}
+  }
+  if (!el) {
+    try { el = document.getElementById(decodeURIComponent(id)); } catch {}
+  }
   if (!el) return;
   const top = el.getBoundingClientRect().top - scrollEl.getBoundingClientRect().top + scrollEl.scrollTop - 14;
   scrollEl.scrollTo({ top, behavior: 'smooth' });
@@ -550,8 +778,8 @@ function updateStats() {
   const cjk = (text.match(cjkRe) || []).length;
   const latin = (text.replace(cjkRe, ' ').match(/[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*/g) || []).length;
   const total = cjk + latin;
-  $('#stat-words').textContent = total ? `共 ${total.toLocaleString()} 字` : '';
-  $('#stat-time').textContent = total ? `约 ${Math.max(1, Math.ceil(total / 400))} 分钟` : '';
+  $('#stat-words').textContent = total ? tf('wordsCount', { count: total.toLocaleString() }) : '';
+  $('#stat-time').textContent = total ? tf('readingTime', { minutes: Math.max(1, Math.ceil(total / 400)) }) : '';
 }
 
 /* ---------- 主题 / 侧栏 / 缩放 ---------- */
@@ -633,11 +861,15 @@ function applyTypewriter(on, persist) {
 /* ---------- 检查更新 ---------- */
 
 let updateModal = null;
+let historyModal = null;
+let integrationModal = null;
 function syncInert() {
   $('#app').inert = !!document.querySelector('.link-modal:not([hidden])');
 }
 function topModalCard() {
   if (updateModal) return updateModal.querySelector('.link-card');
+  if (historyModal) return historyModal.querySelector('.link-card');
+  if (integrationModal) return integrationModal.querySelector('.link-card');
   if (colorPanel) return colorPanel.querySelector('.link-card');
   if (linkModal) return linkModal.querySelector('.link-card');
   const typo = $('#typo-modal');
@@ -646,6 +878,8 @@ function topModalCard() {
 }
 function closeTopModal() {
   if (updateModal) { closeUpdateModal(); return true; }
+  if (historyModal) { closeHistoryModal(); return true; }
+  if (integrationModal) { closeIntegrationModal(); return true; }
   if (colorPanel) { closeColorPanel(); return true; }
   if (linkModal) { (linkModal._cancel || closeLinkModal)(); return true; }
   const typo = $('#typo-modal');
@@ -656,28 +890,132 @@ function closeUpdateModal() {
   if (updateModal) { updateModal.remove(); updateModal = null; }
   syncInert();
 }
+function closeHistoryModal() {
+  if (historyModal) { historyModal.remove(); historyModal = null; }
+  syncInert();
+}
+function closeIntegrationModal() {
+  if (integrationModal) { integrationModal.remove(); integrationModal = null; }
+  syncInert();
+}
+async function openIntegrationSettings() {
+  closeIntegrationModal();
+  const cfg = await api.getConfig();
+  const wrap = document.createElement('div');
+  wrap.className = 'link-modal integration-modal';
+  const card = document.createElement('div');
+  card.className = 'link-card';
+  const title = document.createElement('h3');
+  title.textContent = t('integrationSettings');
+  const l1 = document.createElement('label');
+  l1.textContent = t('pandocPath');
+  const p1 = document.createElement('input');
+  p1.id = 'pandoc-path-input';
+  p1.value = cfg.pandocPath || '';
+  p1.placeholder = 'pandoc';
+  const l2 = document.createElement('label');
+  l2.textContent = t('uploadCommand');
+  const p2 = document.createElement('input');
+  p2.id = 'upload-command-input';
+  p2.value = cfg.imageUploadCommand || '';
+  p2.placeholder = 'piclist upload {file}';
+  const status = document.createElement('div');
+  status.className = 'tree-hint';
+  const st = await api.pandocStatus();
+  status.textContent = st && st.available ? (st.version || 'Pandoc') : t('pandocUnavailable');
+  const btns = document.createElement('div');
+  btns.className = 'link-btns';
+  const close = document.createElement('button');
+  close.textContent = t('closePlain');
+  close.addEventListener('click', closeIntegrationModal);
+  const save = document.createElement('button');
+  save.textContent = t('apply');
+  save.className = 'primary';
+  save.addEventListener('click', async () => {
+    await api.setConfig({ pandocPath: p1.value.trim(), imageUploadCommand: p2.value.trim() });
+    const next = await api.pandocStatus();
+    status.textContent = next && next.available ? (next.version || 'Pandoc') : t('pandocUnavailable');
+    toast(t('settingsSaved'));
+  });
+  btns.append(close, save);
+  card.append(title, l1, p1, l2, p2, status, btns);
+  wrap.append(card);
+  wrap.addEventListener('mousedown', (e) => { if (e.target === wrap) closeIntegrationModal(); });
+  document.body.append(wrap);
+  integrationModal = wrap;
+  syncInert();
+  p1.focus();
+}
+async function openHistoryDialog() {
+  if (!state.path) { toast(t('openFirst')); return; }
+  closeHistoryModal();
+  const items = await api.historyList(state.path);
+  const wrap = document.createElement('div');
+  wrap.className = 'link-modal history-modal';
+  const card = document.createElement('div');
+  card.className = 'link-card history-card';
+  const title = document.createElement('h3');
+  title.textContent = t('historyTitle');
+  const list = document.createElement('div');
+  list.className = 'history-list';
+  if (!items.length) {
+    const hint = document.createElement('div');
+    hint.className = 'tree-hint';
+    hint.textContent = t('noHistory');
+    list.append(hint);
+  }
+  for (const item of items) {
+    const row = document.createElement('div');
+    row.className = 'history-row';
+    const meta = document.createElement('div');
+    meta.className = 'history-meta';
+    meta.textContent = `${new Date(item.time).toLocaleString()} · ${Math.max(1, Math.ceil(item.size / 1024))} KB`;
+    const preview = document.createElement('pre');
+    preview.className = 'history-preview';
+    preview.textContent = item.preview || '';
+    const restore = document.createElement('button');
+    restore.textContent = t('restore');
+    restore.addEventListener('click', async () => {
+      const res = await api.historyRestore(state.path, item.id);
+      if (res && res.saved) { closeHistoryModal(); toast(t('historyRestored')); }
+      else toast(t('saveFailed'));
+    });
+    row.append(meta, preview, restore);
+    list.append(row);
+  }
+  const close = document.createElement('button');
+  close.textContent = t('closePlain');
+  close.addEventListener('click', closeHistoryModal);
+  card.append(title, list, close);
+  wrap.append(card);
+  wrap.addEventListener('mousedown', (e) => { if (e.target === wrap) closeHistoryModal(); });
+  document.body.append(wrap);
+  historyModal = wrap;
+  syncInert();
+  close.focus();
+}
 
 async function checkUpdate() {
-  toast('正在检查更新…');
+  toast(t('checkingUpdate'));
   const res = await api.checkUpdate();
-  if (!res || res.error) { toast('检查更新失败：' + ((res && res.error) || '网络不可达')); return; }
-  if (!res.newer) { toast('已是最新版本 ' + res.current); return; }
+  if (!res || res.error) { toast(t('updateFailedPrefix') + (res && res.error ? tUiText(res.error) : t('networkUnavailable'))); return; }
+  if (!res.newer) { toast(t('latestVersionPrefix') + res.current); return; }
   closeUpdateModal();
   const wrap = document.createElement('div');
   wrap.className = 'link-modal';
   const card = document.createElement('div');
   card.className = 'link-card';
   const title = document.createElement('h3');
-  title.textContent = '发现新版本';
+  title.textContent = t('newVersion');
   const info = document.createElement('div');
   info.className = 'update-info';
-  info.textContent = `当前 ${res.current} → 最新 ${res.latestDisplay}`;
+  info.textContent = `${t('currentPrefix')}${res.current} → ${t('latestPrefix')}${res.latestDisplay}`;
   const btns = document.createElement('div');
   btns.className = 'link-btns';
   const cancel = document.createElement('button');
-  cancel.textContent = '稍后';
+  cancel.textContent = t('later');
   const dl = document.createElement('button');
-  dl.textContent = '下载更新';
+  dl.textContent = t('downloadUpdate');
   dl.className = 'primary';
   dl.addEventListener('click', () => { api.openExternal(res.url); closeUpdateModal(); });
   cancel.addEventListener('click', closeUpdateModal);
@@ -751,20 +1089,39 @@ function applySidebar(show, persist) {
   if (persist) api.setConfig({ sidebar: show });
 }
 
+function applySpellcheck(on) {
+  state.spellcheck = Boolean(on);
+  contentEl.spellcheck = state.spellcheck;
+  editor.spellcheck = state.spellcheck;
+}
+
 /* ---------- 侧栏文件树 ---------- */
 
 const fileTreeEl = $('#file-tree');
+const articleListEl = $('#article-list');
+const globalSearchPanel = $('#global-search-panel');
+const globalSearchInput = $('#global-search-input');
+const globalSearchResults = $('#global-search-results');
 let sidebarTab = 'toc';
 let treeRoot = null;
 let treeSeq = 0;
+let articleSeq = 0;
+let globalSearchSeq = 0;
+let globalSearchTimer = null;
 
 function setSidebarTab(tab, persist = true) {
   sidebarTab = tab;
   $('#tab-toc').classList.toggle('active', tab === 'toc');
   $('#tab-files').classList.toggle('active', tab === 'files');
+  $('#tab-articles').classList.toggle('active', tab === 'articles');
+  $('#tab-search').classList.toggle('active', tab === 'search');
   tocEl.hidden = tab !== 'toc';
   fileTreeEl.hidden = tab !== 'files';
+  articleListEl.hidden = tab !== 'articles';
+  globalSearchPanel.hidden = tab !== 'search';
   if (tab === 'files') renderTreeRoot();
+  else if (tab === 'articles') renderArticlesRoot();
+  else if (tab === 'search') globalSearchInput.focus();
   if (persist) api.setConfig({ sidebarTab: tab });
 }
 
@@ -868,10 +1225,105 @@ async function buildTreeList(dir, depth) {
 }
 
 function refreshTreeActive() {
+  if (sidebarTab === 'articles') { renderArticlesRoot(); return; }
   if (sidebarTab !== 'files') return;
   if (state.dir !== treeRoot) { renderTreeRoot(); return; }
   fileTreeEl.querySelectorAll('.tree-file').forEach((row) => {
     row.classList.toggle('active', row.title === state.path);
+  });
+}
+
+async function renderArticlesRoot() {
+  const seq = ++articleSeq;
+  articleListEl.innerHTML = '';
+  if (!state.dir) {
+    articleListEl.innerHTML = '<div class="tree-hint">打开文件后显示当前目录文章</div>';
+    return;
+  }
+  const loading = document.createElement('div');
+  loading.className = 'tree-hint';
+  loading.textContent = '加载中…';
+  articleListEl.append(loading);
+  try {
+    const items = await api.articles(state.dir);
+    if (seq !== articleSeq) return;
+    loading.remove();
+    if (!items.length) {
+      articleListEl.innerHTML = '<div class="tree-hint">（当前目录无 Markdown 文件）</div>';
+      return;
+    }
+    for (const item of items) {
+      const row = document.createElement('button');
+      row.className = 'article-row';
+      row.dataset.path = item.path;
+      row.title = item.path;
+      const name = document.createElement('span');
+      name.className = 'article-name';
+      name.textContent = item.name;
+      const meta = document.createElement('span');
+      meta.className = 'article-meta';
+      meta.textContent = new Date(item.mtime).toLocaleDateString('zh-CN');
+      row.append(name, meta);
+      row.classList.toggle('active', item.path === state.path);
+      row.addEventListener('click', () => api.openPath(item.path));
+      articleListEl.append(row);
+    }
+  } catch {
+    loading.remove();
+    articleListEl.innerHTML = '<div class="tree-hint">文章列表读取失败</div>';
+  }
+}
+
+function globalSearchHint(text) {
+  globalSearchResults.innerHTML = '';
+  const hint = document.createElement('div');
+  hint.className = 'tree-hint';
+  hint.textContent = text;
+  globalSearchResults.append(hint);
+}
+
+async function runGlobalSearch() {
+  const query = globalSearchInput.value.trim();
+  const seq = ++globalSearchSeq;
+  globalSearchResults.innerHTML = '';
+  if (query.length < 2) { globalSearchHint('输入至少 2 个字符'); return; }
+  if (!state.dir) { globalSearchHint('请先打开一个 Markdown 文件'); return; }
+  const loading = document.createElement('div');
+  loading.className = 'tree-hint';
+  loading.textContent = '搜索中…';
+  globalSearchResults.append(loading);
+  try {
+    const items = await api.searchFiles(state.dir, query);
+    if (seq !== globalSearchSeq) return;
+    loading.remove();
+    if (!items.length) { globalSearchHint('无匹配结果'); return; }
+    for (const item of items) {
+      const row = document.createElement('button');
+      row.className = 'search-result';
+      row.dataset.path = item.path;
+      const head = document.createElement('span');
+      head.className = 'search-result-head';
+      head.textContent = `${item.name}:${item.line}`;
+      const preview = document.createElement('span');
+      preview.className = 'search-result-preview';
+      preview.textContent = item.preview;
+      row.append(head, preview);
+      row.addEventListener('click', () => api.openPath(item.path));
+      globalSearchResults.append(row);
+    }
+  } catch {
+    loading.remove();
+    globalSearchHint('搜索失败，请重试');
+  }
+}
+
+function bindGlobalSearch() {
+  globalSearchInput.addEventListener('input', () => {
+    clearTimeout(globalSearchTimer);
+    globalSearchTimer = setTimeout(runGlobalSearch, 250);
+  });
+  globalSearchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { globalSearchInput.value = ''; runGlobalSearch(); }
   });
 }
 
@@ -1275,9 +1727,9 @@ async function onPaste(e) {
 let dragBlockIdx = -1;
 function bindBlockDrag() {
   contentEl.addEventListener('dragstart', (e) => {
-    const img = e.target.closest('img');
-    if (!img || state.edit) return;
-    const blkEl = img.closest('[data-blk]');
+    const origin = e.target.closest('.blk-drag') || e.target.closest('img');
+    if (!origin || state.edit) return;
+    const blkEl = origin.closest('[data-blk]');
     if (!blkEl) return;
     dragBlockIdx = Number(blkEl.dataset.blk);
     e.dataTransfer.setData('text/x-markview-block', String(dragBlockIdx));
@@ -1318,8 +1770,9 @@ function moveBlock(from, to) {
   if (!a || !b || a === b) return;
   if (from < to) b.after(a);
   else b.before(a);
+  state.gaps = state.blocks.map((b, i) => i < state.blocks.length - 1 ? '\n' : null);
   commitLive();
-  toast('已移动图片块，Ctrl+Z 可撤销');
+  toast('已移动块，Ctrl+Z 可撤销');
 }
 
 /* ---------- 表格工具：右键菜单 / 拖拽宽高 / 配置 ---------- */
@@ -1602,9 +2055,7 @@ function handleLink(a, e) {
   const href = a.getAttribute('href') || '';
   if (href.startsWith('#')) {
     e.preventDefault();
-    let id = href.slice(1);
-    try { id = decodeURIComponent(id); } catch {}
-    scrollToHeading(id);
+    scrollToHeading(href.slice(1));
     return;
   }
   if (/^https?:/i.test(href)) {
@@ -1692,16 +2143,47 @@ function serChildren(node) {
   return out;
 }
 
+function rawHtmlOut(n) {
+  const clone = n.cloneNode(true);
+  clone.querySelectorAll('button').forEach((el) => el.remove());
+  clone.querySelectorAll('.img-resize-wrap').forEach((el) => el.replaceWith(...el.childNodes));
+  clone.querySelectorAll('[data-mv-html], [data-blk], [data-src], [data-cfg], [contenteditable]').forEach((el) => {
+    el.removeAttribute('data-mv-html');
+    el.removeAttribute('data-blk');
+    el.removeAttribute('data-src');
+    el.removeAttribute('data-cfg');
+    el.removeAttribute('contenteditable');
+  });
+  clone.removeAttribute('data-mv-html');
+  clone.removeAttribute('data-blk');
+  clone.removeAttribute('data-src');
+  clone.removeAttribute('data-cfg');
+  clone.removeAttribute('contenteditable');
+  clone.querySelectorAll('img[data-orig-src]').forEach((im) => {
+    im.setAttribute('src', im.dataset.origSrc);
+    im.removeAttribute('data-orig-src');
+    im.removeAttribute('draggable');
+    if ((im.getAttribute('title') || '').startsWith('点击配置图片')) im.removeAttribute('title');
+  });
+  clone.removeAttribute('data-orig-src');
+  clone.removeAttribute('draggable');
+  if ((clone.getAttribute('title') || '').startsWith('点击配置图片')) clone.removeAttribute('title');
+  return clone.outerHTML;
+}
+
 function serInlineEl(n) {
+  if (n.hasAttribute('data-mv-html')) return rawHtmlOut(n);
   const t = n.tagName;
   if (t === 'BR') return '  \n';
   if (t === 'DIV') return '  \n' + serChildren(n);
   if (t === 'BUTTON' || t === 'TEXTAREA' || t === 'INPUT') return '';
   if (t === 'SPAN' && n.dataset.color) return '{' + n.dataset.color + '}(' + serChildren(n) + ')';
+  if (t === 'SPAN' && n.classList.contains('emoji')) return n.dataset.emoji || serChildren(n);
   if (t === 'STRONG' || t === 'B') return '**' + serChildren(n) + '**';
   if (t === 'EM' || t === 'I') return '*' + serChildren(n) + '*';
   if (t === 'DEL' || t === 'S') return '~~' + serChildren(n) + '~~';
   if (t === 'MARK') return '==' + serChildren(n) + '==';
+  if (t === 'U') return '++' + serChildren(n) + '++';
   if (t === 'SUB') return '~' + serChildren(n) + '~';
   if (t === 'CODE') return '`' + n.textContent + '`';
   if (t === 'A') {
@@ -1709,21 +2191,32 @@ function serInlineEl(n) {
     if (n.textContent === href && /^https?:/i.test(href)) return n.textContent;
     return '[' + serChildren(n) + '](' + href + ')';
   }
+  if (t === 'IMG' && n.classList.contains('emoji')) return n.getAttribute('alt') || n.textContent || ':smile:';
   if (t === 'SUP' && n.classList.contains('footnote-ref')) return '[^' + (n.dataset.label || '1') + ']';
   if (t === 'SUP') return '^' + serChildren(n) + '^';
   if (n.classList.contains('katex-display')) return '$$\n' + (n.dataset.tex || '') + '\n$$';
   if (n.classList.contains('katex')) return '$' + (n.dataset.tex || '') + '$';
-  if (t === 'IMG') return '![' + (n.getAttribute('alt') || '') + '](' + (n.dataset.origSrc || n.getAttribute('src')) + ')';
+  if (t === 'IMG') {
+    const src = n.dataset.origSrc || n.getAttribute('src');
+    const alt = n.getAttribute('alt') || '';
+    const width = n.dataset.width || n.getAttribute('width');
+    const height = n.dataset.height || n.getAttribute('height');
+    if (width || height) {
+      return `<img src="${md.utils.escapeHtml(src)}" alt="${md.utils.escapeHtml(alt)}"${width ? ` width="${md.utils.escapeHtml(String(width))}"` : ''}${height ? ` height="${md.utils.escapeHtml(String(height))}"` : ''}>`;
+    }
+    return '![' + alt + '](' + src + ')';
+  }
   return serChildren(n);
 }
 
 function inlineSer(node) {
+  if (node.nodeType === 1 && node.hasAttribute('data-mv-html')) return rawHtmlOut(node);
   if (node.nodeType === 3) return node.textContent.replace(/([\\`*_\[\]])/g, '\\$1');
   if (node.nodeType !== 1) return '';
   const t = node.tagName;
   const isInline = t === 'BR' || t === 'DIV' || t === 'BUTTON' || t === 'TEXTAREA' || t === 'INPUT' ||
     t === 'STRONG' || t === 'B' || t === 'EM' || t === 'I' || t === 'DEL' || t === 'S' || t === 'CODE' ||
-    t === 'MARK' || t === 'SUP' || t === 'SUB' || t === 'A' || t === 'IMG' ||
+    t === 'MARK' || t === 'U' || t === 'SUP' || t === 'SUB' || t === 'A' || t === 'IMG' ||
     (t === 'SPAN' && (node.dataset.color || node.classList.contains('katex') || node.classList.contains('katex-display'))) ||
     (t === 'SUP' && node.classList.contains('footnote-ref'));
   return isInline ? serInlineEl(node) : serChildren(node);
@@ -1754,7 +2247,8 @@ function listSer(list, indent) {
 function quoteSer(bq, depth) {
   const prefix = '> '.repeat(depth);
   const lines = [];
-  [...bq.children].forEach((n, i) => {
+  const children = [...bq.children].filter((n) => n.tagName !== 'BUTTON');
+  children.forEach((n, i) => {
     if (i) lines.push(prefix.trim());
     if (n.tagName === 'BLOCKQUOTE') lines.push(...quoteSer(n, depth + 1));
     else lines.push(prefix + inlineSer(n).trim());
@@ -1789,9 +2283,22 @@ function tableSer(wrap, srcSlice) {
 }
 
 function blockSer(el, blk) {
+  if (el.hasAttribute('data-mv-html')) return [rawHtmlOut(el)];
+  if (el.dataset.mvRawTable === '1') {
+    const table = el.querySelector('table');
+    return table ? [rawHtmlOut(table)] : [];
+  }
   const srcLines = state.raw.split('\n').slice(blk.start, blk.end);
   const tag = el.tagName;
   if (el.classList.contains('toc-inline')) return [el.dataset.tocSrc || '[toc]'];
+  if (el.classList.contains('yaml-frontmatter')) {
+    const ta = el.querySelector('textarea.block-overlay');
+    if (ta) {
+      const close = srcLines[srcLines.length - 1] === '...' ? '...' : '---';
+      return ['---', ...ta.value.split('\n'), close];
+    }
+    return srcLines;
+  }
   if (/^H[1-6]$/.test(tag)) return ['#'.repeat(Number(tag[1])) + ' ' + inlineSer(el).trim()];
   if (tag === 'BLOCKQUOTE') return quoteSer(el, 1);
   if (tag === 'UL' || tag === 'OL') return listSer(el, 0);
@@ -2095,6 +2602,9 @@ function openImageDialog(img, el, index) {
   pick.textContent = '换图…';
   const zoom = document.createElement('button');
   zoom.textContent = '放大查看';
+  const upload = document.createElement('button');
+  upload.className = 'upload-image-btn';
+  upload.textContent = t('uploadImage');
   const del = document.createElement('button');
   del.textContent = '移除图片';
   const cancel = document.createElement('button');
@@ -2119,6 +2629,26 @@ function openImageDialog(img, el, index) {
     validate();
   });
   zoom.addEventListener('click', () => openLightbox(img.src));
+  upload.addEventListener('click', async () => {
+    const rel = img.dataset.origSrc || ui.value.trim();
+    if (!rel || /^(https?:|data:)/i.test(rel)) { err.textContent = t('uploadLocalOnly'); return; }
+    upload.disabled = true;
+    toast(t('uploadingImage'));
+    try {
+      const res = await api.uploadImage(api.resolvePath(state.dir, rel));
+      if (!res || !res.url) { err.textContent = t('uploadFailedPrefix') + tUiText(res && res.error || t('uploadNoUrl')); return; }
+      img.dataset.origSrc = res.url;
+      img.src = res.url;
+      ui.value = res.url;
+      commitBlockOf(img);
+      closeLinkModal();
+      toast(t('uploadSuccess'));
+    } catch (err) {
+      err.textContent = t('uploadFailedPrefix') + (err && err.message || String(err));
+    } finally {
+      upload.disabled = false;
+    }
+  });
   del.addEventListener('click', () => {
     img.remove();
     commitLive();
@@ -2134,7 +2664,7 @@ function openImageDialog(img, el, index) {
     closeLinkModal();
   });
   cancel.addEventListener('click', closeLinkModal);
-  btns.append(pick, zoom, del, cancel, apply);
+  btns.append(pick, zoom, upload, del, cancel, apply);
   card.append(title, r1, ti, r2, ui, err, btns);
   wrap.append(card);
   wrap.addEventListener('mousedown', (ev) => { if (ev.target === wrap) closeLinkModal(); });
@@ -2172,7 +2702,7 @@ function onContentClick(e) {
     if (a) handleLink(a, e);
     return;
   }
-  if (e.target.closest('.copy-btn')) return;
+  if (e.target.closest('.copy-btn, .blk-drag, .blk-delete, .table-cfg-btn')) return;
   const a0 = e.target.closest('a');
   if (a0) {
     e.preventDefault();
@@ -2191,7 +2721,7 @@ function onContentClick(e) {
   if (!blkEl) return;
   const imgOld = e.target.closest('img');
   const isHr = blkEl.tagName === 'HR';
-  const isOverlay = blkEl.classList.contains('mermaid-block') || !!blkEl.querySelector('.katex-display');
+  const isOverlay = blkEl.classList.contains('mermaid-block') || blkEl.classList.contains('yaml-frontmatter') || !!blkEl.querySelector('.katex-display');
   if (!(imgOld || isHr || isOverlay)) return;
   if (state.editing) commitEditing();
   syncNow();
@@ -2302,7 +2832,7 @@ function openLinkDialog(a, isNew = false) {
 function clearHover() {
   if (!hoverBlk) return;
   hoverBlk.classList.remove('blk-hover');
-  hoverBlk.querySelectorAll(':scope > .blk-delete, :scope > .table-cfg-btn').forEach((b) => b.remove());
+  hoverBlk.querySelectorAll(':scope > .blk-delete, :scope > .blk-drag, :scope > .table-cfg-btn').forEach((b) => b.remove());
   hoverBlk = null;
 }
 
@@ -2315,6 +2845,13 @@ function bindBlockHover() {
     if (!blkEl) return;
     hoverBlk = blkEl;
     blkEl.classList.add('blk-hover');
+    const drag = document.createElement('button');
+    drag.className = 'blk-drag';
+    drag.textContent = '⋮⋮';
+    drag.title = '拖拽调整块顺序';
+    drag.draggable = true;
+    drag.addEventListener('mousedown', (ev) => ev.stopPropagation());
+    blkEl.append(drag);
     const btn = document.createElement('button');
     btn.className = 'blk-delete';
     btn.textContent = '删除';
@@ -2330,6 +2867,7 @@ function bindBlockHover() {
     if (blkEl.classList.contains('table-wrap')) {
       const tbl = blkEl.querySelector('table');
       btn.style.right = Math.max(4, blkEl.clientWidth - tbl.offsetWidth - 4) + 'px';
+      drag.style.right = (Math.max(4, blkEl.clientWidth - tbl.offsetWidth - 4) + 88) + 'px';
       const cfgBtn = document.createElement('button');
       cfgBtn.className = 'table-cfg-btn';
       cfgBtn.textContent = '配置';
@@ -2354,6 +2892,7 @@ function bindContent() {
   document.addEventListener('selectionchange', trackSelection);
   bindBlockHover();
   bindBlockDrag();
+  bindImageResizeTools();
   bindLightbox();
   bindTableTools();
   contentEl.addEventListener('dblclick', (e) => {
@@ -2496,10 +3035,10 @@ function toggleEdit(on) {
 function updateSaveStatus() {
   const el = $('#stat-save');
   el.classList.toggle('save-failed', Boolean(state.saveFailed));
-  el.textContent = state.saveFailed ? '保存失败'
-    : state.dirty ? '未保存…'
-    : state.lastSave ? '自动保存 · ' + state.lastSave.toTimeString().slice(0, 8) : '自动保存';
-  el.title = state.saveFailed ? '写入文件失败，请检查文件权限或占用' : '停止输入约 0.25 秒后自动保存';
+  el.textContent = state.saveFailed ? t('saveFailed')
+    : state.dirty ? t('unsaved')
+    : state.lastSave ? tf('autosaveTime', { time: state.lastSave.toTimeString().slice(0, 8) }) : t('autosave');
+  el.title = state.saveFailed ? t('saveErrorHint') : t('saveHint');
 }
 
 async function saveCurrent() {
@@ -2561,6 +3100,7 @@ const INSERT_DEFS = {
   bold: { wrap: ['**', '**'], ph: '加粗文字' },
   italic: { wrap: ['*', '*'], ph: '斜体文字' },
   strike: { wrap: ['~~', '~~'], ph: '删除文字' },
+  underline: { wrap: ['++', '++'], ph: '下划线文字' },
   mark: { wrap: ['==', '=='], ph: '高亮文字' },
   sup: { wrap: ['^', '^'], ph: '上标' },
   sub: { wrap: ['~', '~'], ph: '下标' },
@@ -2785,9 +3325,9 @@ async function insertSnippet(key) {
     onEditorInput();
     return;
   }
-  if (key === 'mark' || key === 'sup' || key === 'sub') {
-    const tag = key.toUpperCase();
-    const d = key === 'mark' ? '==' : key === 'sup' ? '^' : '~';
+  if (key === 'mark' || key === 'underline' || key === 'sup' || key === 'sub') {
+    const tag = key === 'underline' ? 'U' : key.toUpperCase();
+    const d = key === 'mark' ? '==' : key === 'underline' ? '++' : key === 'sup' ? '^' : '~';
     if (state.edit) {
       pushUndo();
       const s = editor.selectionStart;
@@ -2941,7 +3481,7 @@ function clearInlineFormat() {
   if (!range) { toast('请先选中文字'); return; }
   const blk = blockOfRange(range);
   if (!blk || blk.tagName === 'PRE') { toast('代码块请在源码模式编辑'); return; }
-  blk.querySelectorAll('strong, b, em, i, del, s, code, mark, sup, sub, span[data-color], a').forEach((el) => {
+  blk.querySelectorAll('strong, b, em, i, del, s, u, code, mark, sup, sub, span[data-color], a').forEach((el) => {
     if (range.intersectsNode(el)) el.replaceWith(...el.childNodes);
   });
   document.getSelection().removeAllRanges();
@@ -3015,7 +3555,7 @@ async function exportPdf() {
       })
     ));
     const res = await api.exportPdf();
-    if (res && res.saved) toast('已导出：' + api.basename(res.path));
+    if (res && res.saved) toast(tf('exported', { name: api.basename(res.path) }));
   } catch (err) {
     console.error(err);
     toast('PDF 导出失败');
@@ -3050,7 +3590,7 @@ async function exportImage() {
     const height = Math.min(fullHeight, 16000);
     const res = await api.exportImage({ width, height });
     if (res && res.saved) {
-      toast(fullHeight > 16000 ? '已导出（超长文档截断至 16000px）：' + api.basename(res.path) : '已导出：' + api.basename(res.path));
+      toast(fullHeight > 16000 ? tf('exportedTruncated', { name: api.basename(res.path) }) : tf('exported', { name: api.basename(res.path) }));
     } else if (res && res.error) {
       toast('长图导出失败：' + res.error);
     }
@@ -3063,9 +3603,29 @@ async function exportImage() {
   }
 }
 
+/* ---------- Pandoc 导出 ---------- */
+
+async function exportPandoc(format) {
+  if (exporting) return;
+  if (!state.path) { toast(t('openFirst')); return; }
+  const status = await api.pandocStatus();
+  if (!status || !status.available) { toast(t('pandocUnavailable')); return; }
+  exporting = true;
+  toast(t('pandocGenerating'));
+  try {
+    const res = await api.exportPandoc(format);
+    if (res && res.saved) toast(tf('exported', { name: api.basename(res.path) }));
+    else if (res && res.error) toast(t('pandocFailedPrefix') + tUiText(res.error));
+  } catch (err) {
+    toast(t('pandocFailedPrefix') + (err && err.message || String(err)));
+  } finally {
+    exporting = false;
+  }
+}
+
 /* ---------- HTML 导出 ---------- */
 
-async function exportHtml() {
+async function exportHtml(bare = false) {
   if (exporting) return;
   if (!state.path) { toast('请先打开一个 Markdown 文件'); return; }
   exporting = true;
@@ -3073,31 +3633,55 @@ async function exportHtml() {
   commitEditing();
   await flushEditRender();
   try {
-    const fonts = await api.htmlAssets();
-    let css = [...document.styleSheets]
-      .map((ss) => { try { return [...ss.cssRules].map((r) => r.cssText).join('\n'); } catch { return ''; } })
-      .join('\n');
-    css = css.replace(/url\((["']?)([^)"']+\.woff2)\1\)/g, (m, q, name) => {
-      const key = name.split('/').pop();
-      return fonts[key] ? `url(${fonts[key]})` : m;
-    });
+    let css = '';
+    if (!bare) {
+      const fonts = await api.htmlAssets();
+      css = [...document.styleSheets]
+        .map((ss) => { try { return [...ss.cssRules].map((r) => r.cssText).join('\n'); } catch { return ''; } })
+        .join('\n');
+      css = css.replace(/url\((["']?)([^)"']+\.woff2)\1\)/g, (m, q, name) => {
+        const key = name.split('/').pop();
+        return fonts[key] ? `url(${fonts[key]})` : m;
+      });
+      const custom = document.getElementById('custom-theme')?.textContent || '';
+      if (custom) css += '\n' + custom;
+    }
     const clone = contentEl.cloneNode(true);
     clone.querySelectorAll('button, textarea.block-overlay').forEach((n) => n.remove());
+    clone.querySelectorAll('.img-resize-wrap').forEach((n) => n.replaceWith(...n.childNodes));
     clone.querySelectorAll('[data-blk]').forEach((n) => {
       n.removeAttribute('data-blk');
       n.removeAttribute('data-src');
       n.removeAttribute('data-cfg');
     });
+    clone.querySelectorAll('[data-mv-html]').forEach((n) => n.removeAttribute('data-mv-html'));
     clone.querySelectorAll('img[data-orig-src]').forEach((im) => im.setAttribute('src', im.dataset.origSrc));
+    for (const im of clone.querySelectorAll('img')) {
+      im.removeAttribute('data-orig-src');
+      im.removeAttribute('draggable');
+      im.removeAttribute('data-width');
+      im.removeAttribute('data-height');
+      im.removeAttribute('style');
+      if (im.className === '') im.removeAttribute('class');
+      if ((im.getAttribute('title') || '').startsWith('点击配置图片')) im.removeAttribute('title');
+      const src = im.getAttribute('src') || '';
+      if (!src || /^(https?:|data:)/i.test(src)) continue;
+      const abs = api.resolvePath(state.dir, src);
+      const data = await api.imageData(abs);
+      if (data) im.setAttribute('src', data);
+    }
     clone.querySelectorAll('.blk-hover, .drop-target').forEach((n) => n.classList.remove('blk-hover', 'drop-target'));
     clone.removeAttribute('contenteditable');
     clone.className = 'markdown-body';
     const vars = document.documentElement.getAttribute('style') || '';
     const theme = document.documentElement.dataset.theme || 'light';
     const title = (state.name || 'MarkView').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-    const html = `<!doctype html>\n<html lang="zh-CN" data-theme="${theme}">\n<head>\n<meta charset="utf-8">\n<title>${title}</title>\n<style>\n${css}\n</style>\n</head>\n<body style="${vars}">\n<article class="markdown-body" style="max-width:860px;margin:0 auto;padding:32px 24px">\n${clone.innerHTML}\n</article>\n</body>\n</html>\n`;
+    const styleTag = bare ? '' : `<style>\n${css}\n</style>`;
+    const bodyStyle = bare ? '' : ` style="${vars}"`;
+    const articleStyle = bare ? '' : ' style="max-width:860px;margin:0 auto;padding:32px 24px"';
+    const html = `<!doctype html>\n<html lang="zh-CN" data-theme="${theme}">\n<head>\n<meta charset="utf-8">\n<title>${title}</title>\n${styleTag}\n</head>\n<body${bodyStyle}>\n<article class="markdown-body"${articleStyle}>\n${clone.innerHTML}\n</article>\n</body>\n</html>\n`;
     const res = await api.exportHtml(html);
-    if (res && res.saved) toast('已导出：' + api.basename(res.path));
+    if (res && res.saved) toast(tf('exported', { name: api.basename(res.path) }));
     else if (res && res.error) toast('HTML 导出失败：' + res.error);
   } catch (err) {
     console.error(err);
@@ -3152,6 +3736,8 @@ function bindToolbar() {
   $('#btn-sidebar').addEventListener('click', () => applySidebar(!state.sidebar, true));
   $('#tab-toc').addEventListener('click', () => setSidebarTab('toc'));
   $('#tab-files').addEventListener('click', () => setSidebarTab('files'));
+  $('#tab-articles').addEventListener('click', () => setSidebarTab('articles'));
+  $('#tab-search').addEventListener('click', () => setSidebarTab('search'));
   $('#btn-open').addEventListener('click', () => api.openDialog());
   $('#btn-theme').addEventListener('click', () => {
     const next = THEMES[(THEMES.indexOf(state.theme) + 1) % THEMES.length];
@@ -3232,6 +3818,11 @@ function bindIpc() {
   });
   api.on('theme:set', (t) => applyTheme(t, true));
   api.on('font:set', (f) => applyFont(f, true));
+  api.on('spellcheck:set', (v) => applySpellcheck(v));
+  api.on('language:set', (v) => applyLanguage(v));
+  api.on('direction:set', (v) => applyDirection(v));
+  api.on('customCss:set', (v) => applyCustomCss(v));
+  api.on('customCss:reload', () => api.reloadCustomCss());
   api.on('zoom:changed', (level) => { state.zoom = level; updateZoomLabel(); });
   api.on('menu:find', openSearch);
   api.on('menu:toggle-sidebar', () => applySidebar(!state.sidebar, true));
@@ -3245,11 +3836,15 @@ function bindIpc() {
   api.on('menu:insert', insertSnippet);
   api.on('menu:typography', openTypoPanel);
   api.on('menu:check-update', checkUpdate);
+  api.on('menu:history', openHistoryDialog);
+  api.on('menu:integration-settings', openIntegrationSettings);
   api.on('menu:copy-md', () => copySelectionAs('md'));
   api.on('menu:copy-html', () => copySelectionAs('html'));
   api.on('pdf:prepare', exportPdf);
   api.on('image:prepare', exportImage);
-  api.on('html:prepare', exportHtml);
+  api.on('html:prepare', () => exportHtml(false));
+  api.on('html:prepare-bare', () => exportHtml(true));
+  api.on('pandoc:export', exportPandoc);
   api.on('find:result', ({ active, total }) => {
     if (!state.edit) return;
     searchCount.textContent = total ? `${active}/${total}` : '无结果';
@@ -3267,19 +3862,25 @@ async function init() {
     console.error('unhandled rejection:', (e.reason && e.reason.stack) || e.reason)
   );
   const cfg = await api.getConfig();
+  applyLanguage(await api.locale());
+  applyCustomCss(await api.customCss());
+  applyDirection(cfg.direction || 'auto');
   state.zoom = typeof cfg.zoom === 'number' ? cfg.zoom : 0;
   api.version().then((v) => { $('#welcome-version').textContent = v; });
   applyTheme(cfg.theme || 'light', false);
   applyFont(cfg.font || 'sans', false);
+  applySpellcheck(cfg.spellcheck === true);
   applyWide(cfg.wide === true, false);
   applyFocusMode(cfg.focusMode === true, false);
   applyTypewriter(cfg.typewriterMode === true, false);
   applyTypography(cfg.typography, false);
   applySidebar(cfg.sidebar !== false, false);
-  setSidebarTab(cfg.sidebarTab === 'files' ? 'files' : 'toc', false);
+  setSidebarTab(['files', 'articles', 'search'].includes(cfg.sidebarTab) ? cfg.sidebarTab : 'toc', false);
   updateZoomLabel();
   bindToolbar();
   bindSearch();
+  bindGlobalSearch();
+  bindLanguageObserver();
   bindScroll();
   bindDragDrop();
   bindKeys();

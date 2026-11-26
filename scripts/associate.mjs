@@ -3,6 +3,11 @@ import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+if (process.platform !== 'win32') {
+  console.log('文件关联脚本仅支持 Windows；macOS/Linux 请使用安装包声明的文件关联。');
+  process.exit(0);
+}
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // 关联目标必须是稳定副本：node_modules 里的副本会被 npm 升级清掉，package/ 里的包会被 dist 清理删掉
 const stableDir = path.join(process.env.LOCALAPPDATA, 'MarkView');

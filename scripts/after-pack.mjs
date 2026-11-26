@@ -6,6 +6,7 @@ import path from 'node:path';
 const PRUNE = ['dxcompiler.dll', 'dxil.dll'];
 
 export default async function afterPack(context) {
+  if (context.packager.platform.nodeName !== 'win32') return;
   for (const name of PRUNE) {
     const p = path.join(context.appOutDir, name);
     if (fs.existsSync(p)) fs.rmSync(p);

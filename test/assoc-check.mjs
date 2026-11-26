@@ -15,6 +15,7 @@ const stable = path.join(process.env.LOCALAPPDATA, 'MarkView', 'MarkView.exe');
 
 const keys = [
   'HKCU\\Software\\Classes\\MarkView.md\\shell\\open\\command',
+  'HKCU\\Software\\Classes\\md_auto_file\\shell\\open\\command',
   'HKCU\\Software\\Classes\\Applications\\MarkView.exe\\shell\\open\\command',
   'HKCU\\Software\\Classes\\SystemFileAssociations\\.md\\shell\\MarkView\\command',
 ];
@@ -27,5 +28,15 @@ for (const k of keys) {
 }
 const uc = (q('HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\.md\\UserChoice', false).match(/ProgId\s+REG_SZ\s+(.+)/) || [])[1]?.trim() || '';
 console.log('UserChoice:', uc || '(none)', /setup/i.test(uc) ? '← 仍指向安装包，需在「打开方式」中重选 MarkView 并勾选始终使用' : '(ok)');
+for (const ext of ['.md', '.markdown']) {
+  const progId = (q(`HKCU\\Software\\Classes\\${ext}`).match(/REG_SZ\s+(.+)/) || [])[1]?.trim() || '';
+  const ok = progId === 'md_auto_file';
+  console.log(ok ? 'PASS' : 'FAIL', `${ext} default ProgId ->`, progId || '(missing)');
+  if (!ok) fail++;
+}
+const friendly = (q('HKCU\\Software\\Classes\\md_auto_file\\shell\\open', false).match(/FriendlyAppName\s+REG_SZ\s+(.+)/) || [])[1]?.trim() || '';
+const friendlyOk = friendly === 'MarkView';
+console.log(friendlyOk ? 'PASS' : 'FAIL', 'md_auto_file FriendlyAppName ->', friendly || '(missing)');
+if (!friendlyOk) fail++;
 console.log(fail ? `assoc check: FAIL (${fail})` : 'assoc check: PASS');
 process.exit(fail ? 1 : 0);

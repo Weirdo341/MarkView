@@ -43,6 +43,10 @@ try {
 const command = `"${exe}" "%1"`;
 const add = (key, ...rest) => execFileSync('reg', ['add', key, ...rest, '/f'], { stdio: 'ignore' });
 const del = (key) => { try { execFileSync('reg', ['delete', key, '/f'], { stdio: 'ignore' }); } catch {} };
+
+// Windows 的 .md/.markdown 实际回退链是 md_auto_file；同时保留 MarkView.md 供 UserChoice/右键显示。
+add('HKCU\\Software\\Classes\\md_auto_file\\shell\\open\\command', '/ve', '/d', command);
+add('HKCU\\Software\\Classes\\md_auto_file\\shell\\open', '/v', 'FriendlyAppName', '/d', 'MarkView');
 const query = (key) => {
   try { return execFileSync('reg', ['query', key], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); } catch { return ''; }
 };
@@ -96,6 +100,7 @@ for (const ext of ['.md', '.markdown']) {
 add('HKCU\\Software\\RegisteredApplications', '/v', 'MarkView', '/d', 'Software\\MarkView\\Capabilities');
 
 for (const ext of ['.md', '.markdown']) {
+  add(`HKCU\\Software\\Classes\\${ext}`, '/ve', '/d', 'md_auto_file');
   add(`HKCU\\Software\\Classes\\${ext}\\OpenWithProgids`, '/v', 'MarkView.md', '/d', '');
   add(`HKCU\\Software\\Classes\\SystemFileAssociations\\${ext}\\shell\\MarkView`, '/ve', '/d', '用 MarkView 打开');
   add(`HKCU\\Software\\Classes\\SystemFileAssociations\\${ext}\\shell\\MarkView`, '/v', 'Icon', '/d', ico);

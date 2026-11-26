@@ -26,6 +26,7 @@ check('associateGuard', () => read('scripts/associate.mjs').includes("process.pl
 check('unassociateGuard', () => read('scripts/unassociate.mjs').includes("process.platform !== 'win32'"));
 check('distPlatforms', () => read('scripts/dist.mjs').includes('--mac') && read('scripts/dist.mjs').includes('--linux') && read('scripts/dist.mjs').includes("process.platform === 'win32'"));
 check('distArch', () => read('scripts/dist.mjs').includes('--arm64') && read('scripts/dist.mjs').includes('--x64'));
+check('distAutoAssoc', () => read('scripts/dist.mjs').includes('scripts/associate.mjs'));
 check('afterPackGuard', () => read('scripts/after-pack.mjs').includes("nodeName !== 'win32'") || read('scripts/after-pack.mjs').includes("nodeName === 'win32'"));
 check('icnsGenerator', () => read('scripts/make-icon.mjs').includes('icns'));
 

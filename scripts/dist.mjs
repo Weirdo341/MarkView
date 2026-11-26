@@ -49,5 +49,6 @@ if (process.platform === 'win32' && platform === 'win') {
   } catch (err) {
     console.log('警告：稳定关联副本刷新失败（MarkView 可能正在运行）：' + err.message);
   }
+  run(['scripts/associate.mjs']);
 }
 console.log(`安装包已复制到 package/（仅保留 ${version}）；平台：${platform}；解包目录：${out}`);

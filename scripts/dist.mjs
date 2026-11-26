@@ -35,20 +35,8 @@ for (const d of fs.readdirSync(root)) {
     try { fs.rmSync(path.join(root, d), { recursive: true, force: true }); } catch {}
   }
 }
-// 刷新 Windows 文件关联的稳定副本，避免关联指向会被清理的 package/ 产物
+// Windows 关联固定使用本地解包目录，避免每次打开都运行便携版解压
 if (process.platform === 'win32' && platform === 'win') {
-  try {
-    const stableDir = path.join(process.env.LOCALAPPDATA, 'MarkView');
-    fs.mkdirSync(stableDir, { recursive: true });
-    const portable = fs.readdirSync(dest).filter((f) => /^MarkView-Portable-.*\.exe$/.test(f)).sort().pop();
-    if (portable) {
-      fs.copyFileSync(path.join(dest, portable), path.join(stableDir, 'MarkView.exe'));
-      fs.copyFileSync(path.join(root, 'assets', 'icon.ico'), path.join(stableDir, 'MarkView.ico'));
-      console.log('稳定关联副本已刷新：' + path.join(stableDir, 'MarkView.exe'));
-    }
-  } catch (err) {
-    console.log('警告：稳定关联副本刷新失败（MarkView 可能正在运行）：' + err.message);
-  }
-  run(['scripts/associate.mjs']);
+  run(['scripts/associate.mjs', '--unpacked=' + path.join(root, out, 'win-unpacked')]);
 }
 console.log(`安装包已复制到 package/（仅保留 ${version}）；平台：${platform}；解包目录：${out}`);

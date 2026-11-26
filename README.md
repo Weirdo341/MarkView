@@ -2,7 +2,7 @@
 
 简洁的本地 Markdown 阅读与编辑工具（Electron 桌面应用）。双击 `.md` 即可安静阅读：大纲导航、三套主题、代码高亮、数学公式与 Mermaid 图表；阅读视图像 txt 一样直接编辑、实时自动保存；一键导出 PDF 与整篇长图。完全离线，不上传任何内容。Windows 已完整验证；macOS / Linux 构建与文件关联配置已提供，需在目标系统上构建验证。
 
-当前版本：**v2.0.0 (Date 20261126)**
+当前版本：**v2.0.1 (Date 20261126)**
 
 ## 目录
 
@@ -19,12 +19,12 @@
 
 **下载安装包**（GitHub Releases）：
 
-- 安装版：[MarkView-Setup-2.0.0-20261126.exe](https://github.com/Weirdo341/MarkView/releases/download/v2.0.0-20261126/MarkView-Setup-2.0.0-20261126.exe)
-- 便携版：[MarkView-Portable-2.0.0-20261126.exe](https://github.com/Weirdo341/MarkView/releases/download/v2.0.0-20261126/MarkView-Portable-2.0.0-20261126.exe)
+- 安装版：[MarkView-Setup-2.0.1-20261126.exe](https://github.com/Weirdo341/MarkView/releases/download/v2.0.1-20261126/MarkView-Setup-2.0.1-20261126.exe)
+- 便携版：[MarkView-Portable-2.0.1-20261126.exe](https://github.com/Weirdo341/MarkView/releases/download/v2.0.1-20261126/MarkView-Portable-2.0.1-20261126.exe)
 
-**安装版**：双击 `MarkView-Setup-2.0.0-20261126.exe`，按向导选择安装目录（可创建桌面快捷方式）。安装后在开始菜单或桌面启动 MarkView。
+**安装版**：双击 `MarkView-Setup-2.0.1-20261126.exe`，按向导选择安装目录（可创建桌面快捷方式）。安装后在开始菜单或桌面启动 MarkView。
 
-**便携版**：双击 `MarkView-Portable-2.0.0-20261126.exe` 直接运行，无需安装，可放在 U 盘随身携带。
+**便携版**：双击 `MarkView-Portable-2.0.1-20261126.exe` 直接运行，无需安装，可放在 U 盘随身携带。
 
 **源码运行**（开发者）：需要 Node.js 18+。
 
@@ -89,10 +89,12 @@ npm run dist -- --linux  # Linux AppImage / deb（需在 Linux 主机执行）
 **注册关联**（仅当前用户，无需管理员）：
 
 ```bash
-node scripts/associate.mjs
+npm run dist
+# 已有 win-unpacked 时也可单独部署：
+node scripts/associate.mjs --unpacked=<win-unpacked 路径>
 ```
 
-写入 HKCU 注册表：`.md` 等扩展名的打开方式候选、右键「用 MarkView 打开」动词、应用列表登记。关联目标为稳定副本 `%LOCALAPPDATA%\MarkView\MarkView.exe`（由便携版复制，`npm run dist` 自动刷新），不会指向会被清理的 `package/` 产物或会被 npm 升级清掉的 `node_modules` 副本；脚本同时清理历史上误把安装包/便携包本身登记成「打开方式」的注册项。Windows 的 `.md` / `.markdown` 默认 ProgId 固定为系统实际使用的 `md_auto_file`，其 open 命令指向同一稳定副本；`MarkView.md` 保留用于 UserChoice 与右键显示。每次 Windows 打包都会自动重跑关联脚本，后续升级无需手动重新注册。
+写入 HKCU 注册表：`.md` 等扩展名的打开方式候选、右键「用 MarkView 打开」动词、应用列表登记。关联目标固定为解包目录 `%LOCALAPPDATA%\MarkView\app\MarkView.exe`（`app` 是固定链接，实际版本存放在 `%LOCALAPPDATA%\MarkView\versions`，由 `win-unpacked` 复制，`npm run dist` 自动刷新），版本升级不改变路径，也不会指向会被清理的 `package/` 产物或会被 npm 升级清掉的 `node_modules` 副本；脚本同时清理历史上误把安装包/便携版本身登记成「打开方式」的注册项。Windows 的 `.md` / `.markdown` 默认 ProgId 固定为系统实际使用的 `md_auto_file`，其 open 命令指向同一固定目录；`MarkView.md` 保留用于 UserChoice 与右键显示。更新时先完整复制并校验新版，再切换固定链接；若 MarkView 正在运行，会保留旧版并提示关闭后重跑更新命令，后续升级无需手动重新注册。
 
 **设为默认**：Windows 设置 → 应用 → 默认应用 → 按文件类型选择默认应用 → 找到 `.md` → 选择 MarkView；或右键 `.md` → 打开方式 → 选择其他应用 → 勾选「始终使用此应用」。Windows 保护用户默认选择，脚本不会静默篡改。
 
@@ -117,6 +119,12 @@ node scripts/unassociate.mjs
 - **功能边界在哪？** 有意不做：多窗口标签页。正文 HTML 已改为白名单安全渲染；自定义 CSS、RTL、中英文 UI、版本恢复、Pandoc 导出与外部命令图床上传均已提供。macOS / Linux 已提供构建与关联配置，但尚未在对应主机实测。
 
 ## 8. 更新日志
+
+**v2.0.1 (Date 20261126)**
+
+- 修复：Windows 双击 Markdown 等待十几二十秒；文件关联改为固定解包目录，不再每次运行便携版解压
+- 升级：固定 `%LOCALAPPDATA%\MarkView\app\MarkView.exe`，内部版本自动切换，运行时更新保留旧版，中断与注册失败自动恢复
+- 验证：稳定部署生命周期 7/7、关联与跨平台检查通过；Windows 冷启动约 2 秒、热打开约 0.5 秒，Setup / Portable 打包通过
 
 **v2.0.0 (Date 20261126)**
 

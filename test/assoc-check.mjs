@@ -11,7 +11,12 @@ const q = (key, ve = true) => {
 };
 const cmdOf = (key) => (q(key).match(/REG_SZ\s+(.+)/) || [])[1]?.trim() || '';
 const targetOf = (cmd) => (cmd.match(/^"([^"]+)"/) || [])[1] || '';
-const stable = path.join(process.env.LOCALAPPDATA, 'MarkView', 'MarkView.exe');
+const stableDir = path.join(process.env.LOCALAPPDATA, 'MarkView');
+const stable = path.join(stableDir, 'app', 'MarkView.exe');
+const stableAsar = path.join(stableDir, 'app', 'resources', 'app.asar');
+const stableLink = path.join(stableDir, 'app');
+const stableIsLink = fs.existsSync(stableLink) && fs.lstatSync(stableLink).isSymbolicLink();
+const expectedCommand = `"${stable}" "%1"`;
 
 const keys = [
   'HKCU\\Software\\Classes\\MarkView.md\\shell\\open\\command',
@@ -21,8 +26,9 @@ const keys = [
 ];
 let fail = 0;
 for (const k of keys) {
-  const t = targetOf(cmdOf(k));
-  const ok = !!t && fs.existsSync(t) && !/setup/i.test(path.basename(t)) && path.resolve(t) === path.resolve(stable);
+  const command = cmdOf(k);
+  const t = targetOf(command);
+  const ok = stableIsLink && command === expectedCommand && fs.existsSync(t) && fs.existsSync(stableAsar);
   console.log(ok ? 'PASS' : 'FAIL', k, '->', t || '(missing)');
   if (!ok) fail++;
 }
